@@ -1,0 +1,4 @@
+openai-agents
+openpyxl
+python-dotenv
+xlwings>=0.30.0
