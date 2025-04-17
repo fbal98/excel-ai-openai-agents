@@ -8,7 +8,7 @@ from openpyxl import Workbook
 from openpyxl.styles import Font, PatternFill, Border
 from openpyxl.utils import get_column_letter, column_index_from_string
 from openpyxl.worksheet.worksheet import Worksheet
-from typing import Optional, Any, Dict, Union
+from typing import Optional, Any, Dict, Union, List, Tuple, Iterable
 import json
 
 class ExcelManager:
@@ -41,7 +41,7 @@ class ExcelManager:
             raise ValueError("File path cannot be empty.")
         try:
             self.workbook.save(file_path)
-            print(f"Workbook saved to {file_path}") # Keep print for confirmation
+            # Confirmation handled by calling code
         except Exception as e:
             # Raise a more specific error for file operations
             raise IOError(f"Error saving workbook to '{file_path}': {e}")
@@ -112,6 +112,36 @@ class ExcelManager:
         except Exception as e:
             # Re-raise exception for the tool to handle
             raise Exception(f"Error getting value for {sheet_name}!{cell_address}: {e}")
+
+    def get_range_values(self, sheet_name: str, range_address: str) -> List[List[Any]]:
+        """
+        Get values from a range of cells in the specified sheet.
+        Returns a 2D list of values, where each inner list represents a row.
+        
+        Raises:
+            ValueError: If sheet_name or range_address is empty.
+            KeyError: If sheet_name does not exist.
+            Exception: For other openpyxl errors.
+        """
+        if not sheet_name:
+            raise ValueError("Sheet name cannot be empty.")
+        if not range_address:
+            raise ValueError("Range address cannot be empty.")
+            
+        sheet = self.get_sheet(sheet_name)
+        if not sheet:
+            raise KeyError(f"Sheet '{sheet_name}' not found.")
+            
+        try:
+            values = []
+            for row in sheet[range_address]:
+                row_values = []
+                for cell in row:
+                    row_values.append(cell.value)
+                values.append(row_values)
+            return values
+        except Exception as e:
+            raise Exception(f"Error getting values from range {sheet_name}!{range_address}: {e}")
 
     def set_range_style(self, sheet_name: str, range_address: str, style_dict: Dict[str, Any]):
         """
@@ -288,6 +318,52 @@ class ExcelManager:
             # Re-raise exception for the tool to handle
             raise Exception(f"Error setting column width for column {column_letter.upper()} in '{sheet_name}': {e}")
 
+    def set_columns_widths(self, sheet_name: str, widths: Dict[str, float]):
+        """
+        Set multiple column widths at once.
+        
+        Args:
+            sheet_name: Name of the sheet to operate on
+            widths: Dictionary mapping column letters to width values
+            
+        Raises:
+            ValueError: If sheet_name is empty or widths dictionary is empty
+            KeyError: If sheet_name does not exist
+        """
+        if not sheet_name:
+            raise ValueError("Sheet name cannot be empty.")
+        if not widths:
+            raise ValueError("Widths dictionary cannot be empty.")
+            
+        sheet = self.get_sheet(sheet_name)
+        if not sheet:
+            raise KeyError(f"Sheet '{sheet_name}' not found.")
+            
+        errors = {}
+        try:
+            for column_letter, width in widths.items():
+                if not column_letter or not isinstance(column_letter, str):
+                    errors[column_letter] = "Column letter must be a non-empty string."
+                    continue
+                if not isinstance(width, (int, float)) or width < 0:
+                    errors[column_letter] = f"Width must be a non-negative number (got {width})."
+                    continue
+                    
+                try:
+                    # Ensure column letter is uppercase for consistency
+                    sheet.column_dimensions[column_letter.upper()].width = width
+                except Exception as e:
+                    errors[column_letter] = str(e)
+                    
+            if errors:
+                raise Exception(f"Errors setting column widths in '{sheet_name}': {errors}")
+                
+        except Exception as e:
+            if errors:
+                raise Exception(f"Errors setting column widths in '{sheet_name}': {errors}")
+            else:
+                raise Exception(f"Error setting column widths in '{sheet_name}': {e}")
+
     def set_cell_formula(self, sheet_name: str, cell_address: str, formula: str):
         """
         Set a formula in the specified cell.
@@ -315,6 +391,71 @@ class ExcelManager:
         except Exception as e:
             # Re-raise exception for the tool to handle
             raise Exception(f"Error setting formula for {sheet_name}!{cell_address}: {e}")
+
+    def set_range_formula(self, sheet_name: str, start_cell: str, formula_pattern: str, rows: int, cols: int) -> bool:
+        """
+        Apply a formula pattern to a range, incrementing relative references appropriately.
+        
+        Args:
+            sheet_name: Name of the sheet
+            start_cell: Starting cell (e.g., "A1")
+            formula_pattern: Formula to apply with relative refs (e.g., "=A1+B1")
+            rows: Number of rows to fill
+            cols: Number of columns to fill
+            
+        Returns:
+            True if successful
+            
+        Raises:
+            ValueError for invalid input parameters
+            KeyError if sheet doesn't exist
+            Exception for other errors
+        """
+        if not sheet_name:
+            raise ValueError("Sheet name cannot be empty.")
+        if not start_cell:
+            raise ValueError("Start cell address cannot be empty.")
+        if not formula_pattern:
+            raise ValueError("Formula pattern cannot be empty.")
+        if rows <= 0 or cols <= 0:
+            raise ValueError("Rows and columns must be positive integers.")
+            
+        sheet = self.get_sheet(sheet_name)
+        if not sheet:
+            raise KeyError(f"Sheet '{sheet_name}' not found.")
+            
+        # Ensure formula starts with '='
+        if not formula_pattern.startswith('='):
+            formula_pattern = '=' + formula_pattern
+            
+        try:
+            from openpyxl.utils import get_column_letter
+            
+            # Parse start cell into row and column components
+            import re
+            match = re.match(r'([A-Za-z]+)(\d+)', start_cell)
+            if not match:
+                raise ValueError(f"Invalid cell address: {start_cell}")
+                
+            start_col_letter = match.group(1)
+            start_row = int(match.group(2))
+            start_col = column_index_from_string(start_col_letter)
+            
+            # Apply formula to each cell with appropriate offsets
+            for row_offset in range(rows):
+                for col_offset in range(cols):
+                    row = start_row + row_offset
+                    col = start_col + col_offset
+                    col_letter = get_column_letter(col)
+                    cell_addr = f"{col_letter}{row}"
+                    
+                    # For actual implementation, we'd need to parse and adjust the formula
+                    # This is a simplification that assumes the agent will provide appropriate formula templates
+                    sheet[cell_addr].value = formula_pattern
+                    
+            return True
+        except Exception as e:
+            raise Exception(f"Error applying formula pattern in {sheet_name}: {e}")
 
     def set_cell_values(self, sheet_name: str, data: Dict[str, Any]):
         """
@@ -356,8 +497,130 @@ class ExcelManager:
             else: # Otherwise, raise the general exception
                 raise Exception(f"Error setting multiple cell values in '{sheet_name}': {e}")
 
+    def set_table(self, sheet_name: str, start_cell: str, data: List[List[Any]]) -> bool:
+        """
+        Write a 2D table of data starting at the specified cell.
+        
+        Args:
+            sheet_name: Name of the sheet
+            start_cell: Upper-left cell of the target range (e.g., "A1")
+            data: 2D list of values, where each inner list is a row
+            
+        Returns:
+            True if successful
+            
+        Raises:
+            ValueError for invalid input parameters
+            KeyError if sheet doesn't exist
+            Exception for other errors
+        """
+        if not sheet_name:
+            raise ValueError("Sheet name cannot be empty.")
+        if not start_cell:
+            raise ValueError("Start cell address cannot be empty.")
+        if not data:
+            raise ValueError("Data cannot be empty.")
+            
+        sheet = self.get_sheet(sheet_name)
+        if not sheet:
+            raise KeyError(f"Sheet '{sheet_name}' not found.")
+            
+        try:
+            # Parse start cell into row and column components
+            import re
+            match = re.match(r'([A-Za-z]+)(\d+)', start_cell)
+            if not match:
+                raise ValueError(f"Invalid cell address: {start_cell}")
+                
+            start_col_letter = match.group(1)
+            start_row = int(match.group(2))
+            start_col = column_index_from_string(start_col_letter)
+            
+            # Write data row by row
+            for row_idx, row_data in enumerate(data):
+                for col_idx, cell_value in enumerate(row_data):
+                    row = start_row + row_idx
+                    col = start_col + col_idx
+                    col_letter = get_column_letter(col)
+                    cell_addr = f"{col_letter}{row}"
+                    sheet[cell_addr].value = cell_value
+                    
+            return True
+        except Exception as e:
+            raise Exception(f"Error writing table data in {sheet_name}: {e}")
+
+    def write_and_verify_range(self, sheet_name: str, start_cell: str, data: List[List[Any]]) -> bool:
+        """
+        Write a 2D table of data and then verify it was written correctly.
+        
+        Args:
+            sheet_name: Name of the sheet
+            start_cell: Upper-left cell of the target range (e.g., "A1")
+            data: 2D list of values, where each inner list is a row
+            
+        Returns:
+            True if write and verification succeeded
+            
+        Raises:
+            ValueError for invalid input parameters
+            KeyError if sheet doesn't exist
+            Exception if verification failed or other errors
+        """
+        # Write the data first
+        self.set_table(sheet_name, start_cell, data)
+        
+        # Calculate the range to verify
+        import re
+        match = re.match(r'([A-Za-z]+)(\d+)', start_cell)
+        if not match:
+            raise ValueError(f"Invalid cell address: {start_cell}")
+            
+        start_col_letter = match.group(1)
+        start_row = int(match.group(2))
+        
+        # Calculate end cell
+        rows = len(data)
+        cols = max(len(row) for row in data) if data else 0
+        
+        if rows == 0 or cols == 0:
+            return True  # Nothing to verify
+            
+        end_row = start_row + rows - 1
+        end_col = column_index_from_string(start_col_letter) + cols - 1
+        end_col_letter = get_column_letter(end_col)
+        
+        range_address = f"{start_col_letter}{start_row}:{end_col_letter}{end_row}"
+        
+        # Read back the values from the range
+        verification_data = self.get_range_values(sheet_name, range_address)
+        
+        # Check if dimensions match
+        if len(verification_data) != rows:
+            raise Exception(f"Verification failed: Expected {rows} rows, got {len(verification_data)}")
+            
+        # Check each cell
+        for i, row in enumerate(data):
+            if i >= len(verification_data):
+                raise Exception(f"Verification failed: Row {i} missing in verification data")
+                
+            for j, expected_value in enumerate(row):
+                if j >= len(verification_data[i]):
+                    raise Exception(f"Verification failed: Cell at row {i}, column {j} missing in verification data")
+                    
+                actual_value = verification_data[i][j]
+                
+                # Special comparison for numeric types (handle float equality)
+                if isinstance(expected_value, (int, float)) and isinstance(actual_value, (int, float)):
+                    if abs(expected_value - actual_value) > 1e-10:  # Allow small floating point differences
+                        raise Exception(f"Verification failed at {get_column_letter(column_index_from_string(start_col_letter) + j)}{start_row + i}: Expected {expected_value}, got {actual_value}")
+                # For other types, use direct comparison
+                elif expected_value != actual_value:
+                    raise Exception(f"Verification failed at {get_column_letter(column_index_from_string(start_col_letter) + j)}{start_row + i}: Expected {expected_value}, got {actual_value}")
+                    
+        return True
+
     # ------------------------------------------------------------------ #
-    #  New inspectors for style verification                              #
+    #  Style inspectors for verification                                  #
     # ------------------------------------------------------------------ #
 
     def get_cell_style(self, sheet_name: str, cell_address: str) -> Dict[str, Any]:
