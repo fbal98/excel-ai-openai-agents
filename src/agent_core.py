@@ -5,6 +5,7 @@ from .tools import (
     set_cell_value_tool,
     get_cell_value_tool,
     get_range_values_tool,  # Tool for verifying ranges
+    get_dataframe_tool,     # Dump entire sheet as structured data
     set_range_style_tool,
     create_sheet_tool,
     delete_sheet_tool,
@@ -30,6 +31,7 @@ get_active_sheet_name_tool = function_tool(get_active_sheet_name_tool, strict_mo
 set_cell_value_tool = function_tool(set_cell_value_tool, strict_mode=False)
 get_cell_value_tool = function_tool(get_cell_value_tool, strict_mode=False)
 get_range_values_tool = function_tool(get_range_values_tool, strict_mode=False)
+get_dataframe_tool = function_tool(get_dataframe_tool, strict_mode=False)
 set_range_style_tool = function_tool(set_range_style_tool, strict_mode=False)
 create_sheet_tool = function_tool(create_sheet_tool, strict_mode=False)
 delete_sheet_tool = function_tool(delete_sheet_tool, strict_mode=False)
@@ -86,6 +88,8 @@ formulas, and styles.
 • After writing, *immediately* verify critical cells with
   `write_and_verify_range_tool` or `get_range_values_tool`.
 • For edits touching ≥ 20 cells *or* any table insertion, **always** follow the write with `write_and_verify_range_tool` on the full affected range and surface any mismatches.
+• After writing complex data, use `get_dataframe_tool` to confirm the write.
+• For large data sets, use `write_and_verify_range_tool` to write and verify in one step.
 </data_writing>
 
 <formatting>
@@ -137,6 +141,7 @@ excel_assistant_agent = Agent[AppContext]( # Specify context type for clarity
         set_cell_value_tool,
         get_cell_value_tool,
         get_range_values_tool,    # Verify cell ranges
+        get_dataframe_tool,       # Sheet dump
         set_range_style_tool,
         create_sheet_tool,
         delete_sheet_tool,

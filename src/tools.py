@@ -552,6 +552,24 @@ def write_and_verify_range_tool(
         return {"success": False, "diff": diff}
     return {"success": True}
 
+# Tool: Get full sheet as a structured “dataframe”
+def get_dataframe_tool(ctx: RunContextWrapper[AppContext], sheet_name: str, header: bool = True) -> Any:
+    """
+    Returns the entire sheet as a structured dump:
+        {"columns": [...], "rows": [[...], ...]}
+    Args:
+        sheet_name: Worksheet name.
+        header: Treat first row as headers (default True).
+    """
+    print(f"[TOOL] get_dataframe_tool: sheet={sheet_name}, header={header}")
+    if not sheet_name:
+        return {"error": "Tool 'get_dataframe_tool' failed: 'sheet_name' cannot be empty."}
+    try:
+        return ctx.context.excel_manager.get_sheet_dataframe(sheet_name, header)
+    except Exception as e:
+        print(f"[TOOL ERROR] get_dataframe_tool: {e}")
+        return {"error": f"Exception dumping sheet '{sheet_name}': {e}"}
+
 # ------------------------------------------------------------------ #
 #  Style‑inspection tools                                            #
 # ------------------------------------------------------------------ #

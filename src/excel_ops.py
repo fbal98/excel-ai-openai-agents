@@ -665,6 +665,52 @@ class ExcelManager:
                     
         return True
 
+    def get_sheet_dataframe(self, sheet_name: str, header: bool = True) -> Dict[str, Any]:
+        """
+        Return the entire sheet as a serialisable dict similar to a DataFrame.
+
+        Args:
+            sheet_name: Target worksheet name.
+            header: If True (default) treat the first row as column headers;
+                    otherwise generate generic column names `col_1 … col_n`.
+
+        Returns:
+            {"columns": [...], "rows": [[...], ...]}
+        """
+        if not sheet_name:
+            raise ValueError("Sheet name cannot be empty.")
+
+        sheet = self.get_sheet(sheet_name)
+        if sheet is None:
+            raise KeyError(f"Sheet '{sheet_name}' not found.")
+
+        # Pull all rows (values_only=True gives raw Python types).
+        data: List[List[Any]] = [list(r) for r in sheet.iter_rows(values_only=True)]
+
+        # Drop trailing completely‑empty rows
+        while data and all(cell is None for cell in data[-1]):
+            data.pop()
+
+        if not data:
+            return {"columns": [], "rows": []}
+
+        if header:
+            columns = [
+                str(c) if c is not None else f"col_{i+1}"
+                for i, c in enumerate(data[0])
+            ]
+            rows = data[1:]
+        else:
+            columns = [f"col_{i+1}" for i in range(len(data[0]))]
+            rows = data
+
+        # Normalise row lengths (pad missing cells with None)
+        col_count = len(columns)
+        norm_rows: List[List[Any]] = [
+            (row + [None] * (col_count - len(row)))[:col_count] for row in rows
+        ]
+        return {"columns": columns, "rows": norm_rows}
+
     # ------------------------------------------------------------------ #
     #  Style inspectors for verification                                  #
     # ------------------------------------------------------------------ #
