@@ -460,6 +460,26 @@ def set_table_tool(ctx: RunContextWrapper[AppContext],
     except Exception as e:
         return {"error": str(e)}
 
+# Tool: Insert a formatted Excel table
+def insert_table_tool(
+    ctx: RunContextWrapper[AppContext],
+    sheet_name: str,
+    start_cell: str,
+    columns: List[Any],
+    rows: List[List[Any]],
+    table_name: Optional[str] = None,
+    table_style: Optional[str] = None,
+) -> Any:
+    """
+    Inserts a formatted Excel table with headers and data in one call.
+    """
+    try:
+        ctx.context.excel_manager.insert_table(sheet_name, start_cell, columns, rows, table_name, table_style)
+        return True
+    except Exception as e:
+        print(f"[TOOL ERROR] insert_table_tool: {e}")
+        return {"error": f"Exception in insert_table_tool: {e}"}
+
 def set_columns_widths_tool(ctx: RunContextWrapper[AppContext],
                             sheet_name: str,
                             widths: Dict[str, float]) -> Any:

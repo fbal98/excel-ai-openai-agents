@@ -1,0 +1,41 @@
+#############
+Prompt: 
+Create a new sheet called "Dashboard". Pull the numeric columns from the sheet "Sales" (headers are on row 1).  
+Insert at A2 a formatted table that shows: Total Revenue, Total Units, Average Unit Price, Highest Single Sale.  
+Keep all numbers live with formulas, bold the header row, and auto‑size the new columns.
+
+Observation: 
+📤 Final Output:
+The sheet named "Sales" does not appear to exist; the only sheet detected is named "Sheet." Could you please confirm the exact name of the source sheet containing the sales data?
+
+tool uses: 
+get_range_values_tool
+get_sheet_names_tool()
+
+#############
+
+Prompt: 
+Make a sheet "Summary 2024". For every sheet whose name starts with Q (Q1,Q2,Q3,Q4),
+pull the total sales in cell E2 and list them, then add a grand‑total formula.
+
+Observation: 
+📤 Final Output:
+There are no sheets with names starting with Q to summarize. Please confirm if you want to create the 'Summary 2024' sheet without data or provide the Q sheets.
+
+tool uses: 
+get_sheet_names_tool
+
+#############
+
+Prompt: 
+Make a sheet "Summary 2024". For every sheet whose name starts with Q (Q1,Q2,Q3,Q4),
+pull the total sales in cell E2 and list them, then add a grand‑total formula.
+
+Observation: 
+📤 Final Output:
+On sheet "Inventory" highlight every row whose value in column F (Stock Qty) is below 10
+by filling columns A‑H of that row with solid red.
+tool uses: 
+get_sheet_names_tool
+
+#############

@@ -35,8 +35,14 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--instruction",
         type=str,
-        required=True,
+        required=False,
+        default=None,
         help="Instruction for the agent (natural language)",
+    )
+    parser.add_argument(
+        "--interactive", "-i",
+        action="store_true",
+        help="Start interactive chat mode (conversational CLI)",
     )
     parser.add_argument(
         "--live",
@@ -190,6 +196,21 @@ async def main() -> None:
     # Configure logging
     log_level = logging.DEBUG if args.verbose else logging.INFO
     logging.basicConfig(level=log_level, format="%(message)s")
+
+    # ──────────────────────────────────────────────────────────────────
+    #  Suppress noisy HTTP request logs from OpenAI/HTTPX libraries
+    #  so the console shows only our [TOOL] lines and key agent output
+    # ──────────────────────────────────────────────────────────────────
+    for noisy in (
+        "openai",             # OpenAI client logger
+        "openai._client",     # low‑level client
+        "openai._requester",  # HTTP requester
+        "httpx",              # transport used by OpenAI SDK
+        "httpcore",           # lower‑level HTTP core
+        "httpcore.http11",    # HTTP/1.1 wire logs
+    ):
+        logging.getLogger(noisy).setLevel(logging.WARNING)
+
     logger = logging.getLogger(__name__)
     start_time = time.monotonic()
 
@@ -216,6 +237,31 @@ async def main() -> None:
         logger.info("🆕 Created new workbook")
     if args.live:
         logger.info("📊 Live mode enabled. Changes will appear in Excel in real time.")
+
+    # Interactive chat mode
+    if args.interactive:
+        print("Hello! How can I help you today?")
+        chat_history = []
+        while True:
+            try:
+                user_input = input("> ")
+            except (EOFError, KeyboardInterrupt):
+                print("\nExiting interactive mode.")
+                break
+            if user_input.strip().lower() in ("exit", "quit"):
+                print("Exiting interactive mode.")
+                break
+            chat_history.append({"role": "user", "content": user_input})
+            result = await Runner.run(
+                excel_assistant_agent,
+                input=chat_history,
+                context=app_context,
+                max_turns=25,
+            )
+            reply = result.final_output
+            print(reply)
+            chat_history.append({"role": "assistant", "content": reply})
+        sys.exit(0)
 
     logger.info("\n💡 Instruction: %s", args.instruction)
     logger.info("🤖 Running agent (live=%s)...", args.live)

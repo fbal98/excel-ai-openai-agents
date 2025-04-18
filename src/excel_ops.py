@@ -5,7 +5,7 @@ Provides the ExcelManager class for manipulating Excel files using openpyxl.
 
 import openpyxl
 from openpyxl import Workbook
-from openpyxl.styles import Font, PatternFill, Border
+from openpyxl.styles import Font, PatternFill, Border, Side
 from openpyxl.utils import get_column_letter, column_index_from_string
 from openpyxl.worksheet.worksheet import Worksheet
 from typing import Optional, Any, Dict, Union, List, Tuple, Iterable
@@ -168,7 +168,15 @@ class ExcelManager:
             # Use .get() with default {} to avoid errors if key is missing
             font = Font(**style_dict.get('font', {})) if style_dict.get('font') else None
             fill = PatternFill(**style_dict.get('fill', {})) if style_dict.get('fill') else None
-            border = Border(**style_dict.get('border', {})) if style_dict.get('border') else None
+            # Build Border object safely – translate raw dicts ➜ Side objects
+            border = None
+            if 'border' in style_dict and style_dict['border']:
+                border_dict_raw = style_dict['border']
+                # Each edge may be a dict or already a Side
+                def _mk(side):
+                    return Side(**side) if isinstance(side, dict) else side
+                border_inputs = {k: _mk(v) for k, v in border_dict_raw.items()}
+                border = Border(**border_inputs)
 
             target_cells = sheet[range_address]
 
@@ -548,6 +556,44 @@ class ExcelManager:
             return True
         except Exception as e:
             raise Exception(f"Error writing table data in {sheet_name}: {e}")
+    
+    def insert_table(self, sheet_name: str, start_cell: str, columns: List[str], rows: List[List[Any]], table_name: Optional[str] = None, table_style: Optional[str] = None) -> None:
+        """
+        Insert a formatted Excel table at the given start_cell.
+        columns: list of column headers.
+        rows: list of data rows (each a list of values).
+        table_name: optional display name for the table.
+        table_style: optional built-in table style name (e.g., 'TableStyleMedium9').
+        """
+        from openpyxl.worksheet.table import Table, TableStyleInfo
+        from openpyxl.utils.cell import coordinate_from_string
+        from openpyxl.utils import get_column_letter, column_index_from_string
+
+        sheet = self.get_sheet(sheet_name)
+        if sheet is None:
+            raise KeyError(f"Sheet '{sheet_name}' not found.")
+        # parse start_cell into column letter and row index
+        col_letter, row_idx = coordinate_from_string(start_cell)
+        start_col_idx = column_index_from_string(col_letter)
+        # write header row
+        for idx, header in enumerate(columns):
+            cell = sheet.cell(row=row_idx, column=start_col_idx + idx)
+            cell.value = header
+        # write data rows
+        for r_i, row_data in enumerate(rows):
+            for c_i, value in enumerate(row_data):
+                cell = sheet.cell(row=row_idx + 1 + r_i, column=start_col_idx + c_i)
+                cell.value = value
+        # define table reference range
+        end_col_idx = start_col_idx + len(columns) - 1
+        end_row_idx = row_idx + len(rows)
+        ref = f"{start_cell}:{get_column_letter(end_col_idx)}{end_row_idx}"
+        tbl_name = table_name or f"Table_{sheet_name}_{row_idx}"
+        table = Table(displayName=tbl_name, ref=ref)
+        if table_style:
+            style_info = TableStyleInfo(name=table_style, showRowStripes=True)
+            table.tableStyleInfo = style_info
+        sheet.add_table(table)
 
     def write_and_verify_range(self, sheet_name: str, start_cell: str, data: List[List[Any]]) -> bool:
         """
