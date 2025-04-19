@@ -93,6 +93,67 @@ class ExcelManager:
         self.book = self.app.books.open(self._snapshot_path)
 
     # ──────────────────────────────
+    #  Ensure changes are applied
+    # ──────────────────────────────
+    def ensure_changes_applied(self) -> None:
+        """Force Excel to update and apply any pending changes."""
+        try:
+            # Toggle screen updating to force a refresh
+            self.app.screen_updating = False
+            self.app.screen_updating = True
+            
+            # Force calculation update
+            self.app.calculate()
+            
+            # Activate the active sheet again to force focus
+            active_sheet = self.book.sheets.active
+            active_sheet.activate()
+            
+            # Small delay to allow Excel to process updates
+            import time
+            time.sleep(0.5)
+            
+            print("Excel display refreshed.")
+        except Exception as e:
+            print(f"Warning: Could not refresh Excel display: {e}")
+            
+    def save_with_confirmation(self, file_path: str = None) -> None:
+        """Save the workbook with proper error handling and confirmation."""
+        # First ensure all changes are applied
+        self.ensure_changes_applied()
+        
+        if not file_path:
+            # Generate a default filename with timestamp
+            import datetime
+            timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+            file_path = f"workbook_{timestamp}.xlsx"
+        
+        # Ensure the path has .xlsx extension
+        if not file_path.lower().endswith('.xlsx'):
+            file_path += '.xlsx'
+            
+        try:
+            # Save directly with Excel API to avoid xlwings issues
+            self.book.save(file_path)
+            print(f"Workbook successfully saved to: {file_path}")
+            return file_path
+        except Exception as e:
+            print(f"Error saving workbook: {e}")
+            
+            # Try an alternative path
+            try:
+                # Try saving to the user's Documents folder
+                import os
+                documents_path = os.path.expanduser("~/Documents")
+                alt_path = os.path.join(documents_path, os.path.basename(file_path))
+                self.book.save(alt_path)
+                print(f"Workbook saved to alternative location: {alt_path}")
+                return alt_path
+            except Exception as e2:
+                print(f"All save attempts failed: {e2}")
+                raise RuntimeError(f"Could not save workbook: {e2}")
+
+    # ──────────────────────────────
     #  Explicit save helpers
     # ──────────────────────────────
     def save_workbook(self, file_path: str = None) -> None:
@@ -193,28 +254,66 @@ class ExcelManager:
     ) -> None:
         """
         Currently supports:
-            • 'font': {'bold': True/False}
-            • 'fill': {'start_color': 'FFAABBCC' | '#AABBCC' | 'AABBCC'}
+            • 'font': {'bold': True/False, 'color': 'FFRRGGBB'}
+            • 'fill': {'fill_type': 'solid'/'pattern'/'gradient', 'start_color': 'FFAABBCC', 'end_color': 'FFAABBCC'}
+            • 'border': {'left': {'style': 'thin'}, 'right': {'style': 'thin'}, 'top': {'style': 'thin'}, 'bottom': {'style': 'thin'}}
         Extend as needed.
         """
         sheet = self._require_sheet(sheet_name)
         rng = sheet.range(range_address)
 
-        # Font → bold only for now
+        # Font → bold, color
         if "font" in style and style["font"]:
+            # Handle bold
             bold = style["font"].get("bold")
             if bold is not None:
+                rng.font.bold = bool(bold)
+                
+            # Handle font color
+            color = style["font"].get("color")
+            if color is not None:
                 try:
-                    rng.font.bold = bool(bold)
+                    rgb_tuple = _hex_argb_to_bgr_int(color)
+                    rng.font.color = rgb_tuple
                 except:
-                    # Fallback to Excel API
-                    rng.api.Font.Bold = bool(bold)
+                    pass
 
         # Fill
-        if "fill" in style and style["fill"] and "start_color" in style["fill"]:
-            rgb = style["fill"]["start_color"]
-            rgb_tuple = _hex_argb_to_bgr_int(rgb)
-            rng.color = rgb_tuple
+        if "fill" in style and style["fill"]:
+            # Get fill type
+            fill_type = style["fill"].get("fill_type", "solid")
+            
+            # Handle start color
+            if "start_color" in style["fill"]:
+                rgb = style["fill"]["start_color"]
+                try:
+                    color_int = _hex_argb_to_bgr_int(rgb)
+                    rng.color = color_int
+                except Exception as e:
+                    print(f"Color application error: {e}")
+        
+        # Borders
+        if "border" in style and style["border"]:
+            try:
+                border = style["border"]
+                # Apply borders if specified
+                if "left" in border:
+                    rng.api.Borders(7).LineStyle = 1  # xlContinuous
+                if "right" in border:
+                    rng.api.Borders(10).LineStyle = 1  # xlContinuous
+                if "top" in border:
+                    rng.api.Borders(8).LineStyle = 1  # xlContinuous
+                if "bottom" in border:
+                    rng.api.Borders(9).LineStyle = 1  # xlContinuous
+            except Exception as e:
+                print(f"Border application error: {e}")
+                
+        # Force update the Excel application to show changes
+        try:
+            self.app.screen_updating = False
+            self.app.screen_updating = True
+        except:
+            pass
 
     # ──────────────────────────────
     #  Sheet management
@@ -233,20 +332,94 @@ class ExcelManager:
     #  Merge / unmerge
     # ──────────────────────────────
     def merge_cells_range(self, sheet_name: str, range_address: str) -> None:
-        self._require_sheet(sheet_name).range(range_address).merge()
+        """Merge cells in the specified range."""
+        sheet = self._require_sheet(sheet_name)
+        try:
+            # Direct API approach
+            sheet.range(range_address).api.Merge()
+        except Exception as e:
+            try:
+                # Alternative xlwings approach
+                sheet.range(range_address).merge()
+            except Exception as e2:
+                print(f"Failed to merge cells: {e2}")
 
     def unmerge_cells_range(self, sheet_name: str, range_address: str) -> None:
-        self._require_sheet(sheet_name).range(range_address).unmerge()
+        """Unmerge cells in the specified range."""
+        sheet = self._require_sheet(sheet_name)
+        try:
+            # Direct API approach
+            sheet.range(range_address).api.UnMerge()
+        except Exception as e:
+            try:
+                # Alternative xlwings approach
+                sheet.range(range_address).unmerge()
+            except Exception as e2:
+                print(f"Failed to unmerge cells: {e2}")
 
     # ──────────────────────────────
     #  Row / column sizing
     # ──────────────────────────────
     def set_row_height(self, sheet_name: str, row_number: int, height: float) -> None:
-        self._require_sheet(sheet_name).rows(row_number).row_height = height
+        """Set the height of a specific row in the given sheet."""
+        sheet = self._require_sheet(sheet_name)
+        try:
+            # First attempt with direct row method
+            sheet.api.Rows(row_number).RowHeight = height
+        except Exception as e:
+            try:
+                # Alternative approach using range
+                row_range = f"{row_number}:{row_number}"
+                sheet.range(row_range).row_height = height
+            except Exception as e2:
+                print(f"Failed to set row height: {e2}")
+                raise RuntimeError(f"Failed to set row height for row {row_number} in '{sheet_name}': {e2}")
 
     def set_column_width(self, sheet_name: str, column_letter: str, width: float) -> None:
         rng = f"{column_letter}:{column_letter}"
         self._require_sheet(sheet_name).range(rng).column_width = width
+
+    # ──────────────────────────────
+    #  Copy / Paste range helper
+    # ──────────────────────────────
+    def copy_paste_range(
+        self,
+        src_sheet_name: str,
+        src_range: str,
+        dst_sheet_name: str,
+        dst_anchor: str,
+        paste_opts: str = "values",
+    ) -> None:
+        """
+        Clone *src_range* from *src_sheet_name* and paste into *dst_sheet_name*
+        at *dst_anchor* in a single round‑trip.
+
+        paste_opts:
+            • "values"   → values only
+            • "formulas" → formulas only
+            • "formats"  → formats only
+        """
+        src_sheet = self._require_sheet(src_sheet_name)
+        dst_sheet = self._require_sheet(dst_sheet_name)
+
+        src_rng = src_sheet.range(src_range)
+        rows = src_rng.rows.count
+        cols = src_rng.columns.count
+        dst_rng = dst_sheet.range(dst_anchor).resize(rows, cols)
+
+        opts = paste_opts.lower()
+        if opts == "values":
+            dst_rng.value = src_rng.value
+        elif opts == "formulas":
+            dst_rng.formula = src_rng.formula
+        elif opts == "formats":
+            # xlPasteFormats = ‑4104
+            src_rng.api.Copy()
+            dst_rng.api.PasteSpecial(Paste=-4104)
+        else:
+            raise ValueError(
+                f"Invalid paste_opts '{paste_opts}'. Use 'values', 'formulas', or 'formats'."
+            )
 
     # ──────────────────────────────
     #  (Currently stub) advanced APIs
@@ -378,9 +551,9 @@ class ExcelManager:
 
 
 # ╭────────────────────────── Helper functions ─────────────────────────╮
-def _hex_argb_to_bgr_int(argb_or_rgb: str) -> tuple[int, int, int]:
+def _hex_argb_to_bgr_int(argb_or_rgb: str) -> int:
     """
-    Convert 'FFAABBCC', '#AABBCC', or 'AABBCC' → (r, g, b) tuple.
+    Convert 'FFAABBCC', '#AABBCC', or 'AABBCC' → integer BGR order required by Excel.
     Alpha is discarded.
     """
     s = argb_or_rgb.lstrip("#")
@@ -388,9 +561,9 @@ def _hex_argb_to_bgr_int(argb_or_rgb: str) -> tuple[int, int, int]:
         s = s[2:]
     if len(s) != 6:
         raise ValueError(f"Invalid RGB color '{argb_or_rgb}'")
-    r_hex, g_hex, b_hex = s[0:2], s[2:4], s[4:6]
-    r, g, b = int(r_hex, 16), int(g_hex, 16), int(b_hex, 16)
-    return (r, g, b)
+    r, g, b = s[0:2], s[2:4], s[4:6]
+    bgr_hex = b + g + r
+    return int(bgr_hex, 16)
 
 
 def _bgr_int_to_argb_hex(color_int: int) -> str:

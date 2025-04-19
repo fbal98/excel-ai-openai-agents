@@ -109,7 +109,7 @@ def get_active_sheet_name_tool(ctx: RunContextWrapper[AppContext]) -> Any:
 # Tool: Set cell value
 def set_cell_value_tool(ctx: RunContextWrapper[AppContext], sheet_name: str, cell_address: str, value: Any) -> Any:
     """
-    Sets the value of a single cell.
+    Sets the value of a single cell. **Use this tool only once per turn; if two + cells need updates, call `set_cell_values_tool` instead.**
 
     Args:
         ctx (RunContextWrapper[AppContext]): Agent context containing the ExcelManager.
@@ -464,7 +464,8 @@ def set_table_tool(ctx: RunContextWrapper[AppContext],
         ctx.context.excel_manager.set_cell_values(sheet_name, data)
         return True
     except Exception as e:
-        return {"error": str(e)}
+        print(f"[TOOL ERROR] set_table_tool: {e}")
+        return {"error": f"Bulk write table in '{sheet_name}' starting at '{top_left}' failed: {e}"}
 
 # Tool: Insert a formatted Excel table
 def insert_table_tool(
@@ -499,6 +500,180 @@ def insert_table_tool(
         print(f"[TOOL ERROR] insert_table_tool: {e}")
         return {"error": f"Exception in insert_table_tool: {e}"}
 
+# Tool: Bulk‑write rows starting at column A
+def set_rows_tool(ctx: RunContextWrapper[AppContext], sheet_name: str, start_row: int, rows: List[List[Any]]) -> Any:
+    """
+    Writes a 2‑D Python list *rows* into *sheet_name* beginning at **column A**
+    and **start_row**.  Each inner list is written to consecutive columns.
+
+    Args:
+        sheet_name (str): Worksheet name.
+        start_row   (int): First row number (1‑based).
+        rows  (List[List[Any]]): List of rows to write.
+
+    Returns:
+        True on success, or {'error': str} on failure.
+    """
+    if not sheet_name:
+        return {"error": "Tool 'set_rows_tool' failed: 'sheet_name' cannot be empty."}
+    if not isinstance(start_row, int) or start_row <= 0:
+        return {"error": "Tool 'set_rows_tool' failed: 'start_row' must be a positive integer."}
+    if not rows:
+        return {"error": "Tool 'set_rows_tool' failed: 'rows' cannot be empty."}
+
+    try:
+        data = {}
+        for r_idx, row_vals in enumerate(rows):
+            row_no = start_row + r_idx
+            for c_idx, val in enumerate(row_vals):
+                addr = f"{get_column_letter(c_idx + 1)}{row_no}"
+                data[addr] = val
+        ctx.context.excel_manager.set_cell_values(sheet_name, data)
+        return True
+    except Exception as e:
+        print(f"[TOOL ERROR] set_rows_tool: {e}")
+        return {"error": f"Bulk write rows in '{sheet_name}' starting at row {start_row} failed: {e}"}
+
+# Tool: Bulk‑write columns starting at row 1
+def set_columns_tool(ctx: RunContextWrapper[AppContext], sheet_name: str, start_col: str, cols: List[List[Any]]) -> Any:
+    """
+    Writes a 2‑D Python list *cols* into *sheet_name* beginning at **row 1**
+    and **start_col** (column letter). Each inner list becomes a column written downward.
+
+    Args:
+        sheet_name (str): Worksheet name.
+        start_col  (str): Column letter where the first column should be written.
+        cols (List[List[Any]]): List of columns; each column is a list of values.
+
+    Returns:
+        True on success, or {'error': str} on failure.
+    """
+    if not sheet_name:
+        return {"error": "Tool 'set_columns_tool' failed: 'sheet_name' cannot be empty."}
+    if not start_col or not isinstance(start_col, str):
+        return {"error": "Tool 'set_columns_tool' failed: 'start_col' must be a column letter."}
+    if not cols:
+        return {"error": "Tool 'set_columns_tool' failed: 'cols' cannot be empty."}
+
+    try:
+        c0_idx = column_index_from_string(start_col.upper())
+        data = {}
+        for c_idx, col_vals in enumerate(cols):
+            col_letter = get_column_letter(c0_idx + c_idx)
+            for r_idx, val in enumerate(col_vals):
+                addr = f"{col_letter}{r_idx + 1}"
+                data[addr] = val
+        ctx.context.excel_manager.set_cell_values(sheet_name, data)
+        return True
+    except Exception as e:
+        print(f"[TOOL ERROR] set_columns_tool: {e}")
+        return {"error": f"Bulk write columns in '{sheet_name}' starting at column {start_col} failed: {e}"}
+
+# Tool: Bulk‑write columns starting at row 1
+def set_columns_tool(ctx: RunContextWrapper[AppContext],
+                     sheet_name: str,
+                     start_col: str,
+                     cols: List[List[Any]]) -> Any:
+    """
+    Writes a 2‑D Python list *cols* into *sheet_name* beginning at **row 1**
+    and **start_col**. Each inner list becomes a column written downward.
+
+    Args:
+        sheet_name (str): Worksheet name.
+        start_col  (str): Column letter where the first column should be written.
+        cols       (List[List[Any]]): List of columns; each element is a list of
+                                      values for that column.
+
+    Returns:
+        True on success, or {'error': str} on failure.
+    """
+    if not sheet_name:
+        return {"error": "Tool 'set_columns_tool' failed: 'sheet_name' cannot be empty."}
+    if not start_col or not isinstance(start_col, str):
+        return {"error": "Tool 'set_columns_tool' failed: 'start_col' must be a column letter."}
+    if not cols:
+        return {"error": "Tool 'set_columns_tool' failed: 'cols' cannot be empty."}
+
+    try:
+        c0_idx = column_index_from_string(start_col.upper())
+        data: Dict[str, Any] = {}
+        for c_idx, col_vals in enumerate(cols):
+            col_letter = get_column_letter(c0_idx + c_idx)
+            for r_idx, val in enumerate(col_vals):
+                addr = f"{col_letter}{r_idx + 1}"
+                data[addr] = val
+        ctx.context.excel_manager.set_cell_values(sheet_name, data)
+        return True
+    except Exception as e:
+        print(f"[TOOL ERROR] set_columns_tool: {e}")
+        return {"error": f"Bulk write columns in '{sheet_name}' starting at column {start_col} failed: {e}"}
+
+# Tool: Bulk‑write disjoint named ranges
+def set_named_ranges_tool(ctx: RunContextWrapper[AppContext],
+                          sheet_name: str,
+                          mapping: Dict[str, Any]) -> Any:
+    """
+    Writes to multiple named ranges in one call.
+
+    Args:
+        sheet_name (str): Any existing sheet in the workbook (kept for symmetry).
+        mapping    (Dict[str, Any]): {range_name: scalar | list | 2‑D list}
+
+    Returns:
+        True on success or {'error': str}.
+    """
+    if not mapping:
+        return {"error": "Tool 'set_named_ranges_tool' failed: 'mapping' cannot be empty."}
+
+    try:
+        book = ctx.context.excel_manager.book  # xlwings Book object
+        for rng_name, val in mapping.items():
+            try:
+                rng = book.names[rng_name].refers_to_range
+            except KeyError:
+                return {"error": f"Named range '{rng_name}' not found."}
+            rng.value = val
+        return True
+    except Exception as e:
+        print(f"[TOOL ERROR] set_named_ranges_tool: {e}")
+        return {"error": f"Failed to set named ranges: {e}"}
+
+# Tool: Copy‑paste range (values | formulas | formats)
+def copy_paste_range_tool(
+    ctx: RunContextWrapper[AppContext],
+    src_sheet: str,
+    src_range: str,
+    dst_sheet: str,
+    dst_anchor: str,
+    paste_opts: str,
+) -> Any:
+    """
+    Clone *src_range* from *src_sheet* and paste‑special into *dst_sheet*
+    beginning at *dst_anchor*.
+
+    Args:
+        src_sheet   (str): Source worksheet name.
+        src_range   (str): Source range (A1 style).
+        dst_sheet   (str): Destination worksheet name.
+        dst_anchor  (str): Top‑left destination cell (A1 style).
+        paste_opts  (str): 'values' | 'formulas' | 'formats'.
+
+    Returns:
+        True on success or {'error': str}.
+    """
+    if not all([src_sheet, src_range, dst_sheet, dst_anchor]):
+        return {"error": "All sheet/range parameters are required."}
+    if paste_opts.lower() not in {"values", "formulas", "formats"}:
+        return {"error": "paste_opts must be 'values', 'formulas', or 'formats'."}
+    try:
+        ctx.context.excel_manager.copy_paste_range(
+            src_sheet, src_range, dst_sheet, dst_anchor, paste_opts
+        )
+        return True
+    except Exception as e:
+        print(f"[TOOL ERROR] copy_paste_range_tool: {e}")
+        return {"error": f"Failed to copy/paste range: {e}"}
+
 def set_columns_widths_tool(ctx: RunContextWrapper[AppContext],
                             sheet_name: str,
                             widths: Dict[str, float]) -> Any:
@@ -508,7 +683,8 @@ def set_columns_widths_tool(ctx: RunContextWrapper[AppContext],
             ctx.context.excel_manager.set_column_width(sheet_name, col, w)
         return True
     except Exception as e:
-        return {"error": str(e)}
+        print(f"[TOOL ERROR] set_columns_widths_tool: {e}")
+        return {"error": f"Exception setting column widths in '{sheet_name}': {e}"}
 
 def set_range_formula_tool(ctx: RunContextWrapper[AppContext],
                            sheet_name: str,
@@ -617,7 +793,8 @@ def get_cell_style_tool(
     try:
         return ctx.context.excel_manager.get_cell_style(sheet_name, cell_address)
     except Exception as e:
-        return {"error": str(e)}
+        print(f"[TOOL ERROR] get_cell_style_tool: {e}")
+        return {"error": f"Failed to get cell style for {sheet_name}!{cell_address}: {e}"}
 
 def get_range_style_tool(
     ctx: RunContextWrapper[AppContext], sheet_name: str, range_address: str
@@ -628,7 +805,8 @@ def get_range_style_tool(
     try:
         return ctx.context.excel_manager.get_range_style(sheet_name, range_address)
     except Exception as e:
-        return {"error": str(e)}
+        print(f"[TOOL ERROR] get_range_style_tool: {e}")
+        return {"error": f"Failed to get range style for {sheet_name}!{range_address}: {e}"}
 
 # ------------------------------------------------------------------ #
 #  New: Snapshot and revert tools                                    #

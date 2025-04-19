@@ -126,8 +126,20 @@ async def main() -> None:
                 print("DEBUG: Calling Runner.run...")
                 res = await Runner.run(excel_assistant_agent, input=chat, context=ctx, max_turns=25)
                 print("DEBUG: Runner.run completed")
+                
+                # Ensure all Excel changes are applied before giving feedback to the user
+                try:
+                    print("DEBUG: Ensuring Excel changes are applied...")
+                    excel_mgr.ensure_changes_applied()
+                    print("DEBUG: Excel changes applied.")
+                except Exception as e:
+                    print(f"DEBUG: Error ensuring Excel changes: {e}")
+                
                 reply = res.final_output
                 chat.append({"role": "assistant", "content": reply})
+                # ---- Buffer‑window memory: keep last 4 user‑assistant pairs ----
+                if len(chat) > 8:
+                    chat = chat[-8:]
                 print(reply)
             except (EOFError, KeyboardInterrupt):
                 print("\nExiting.")
@@ -154,10 +166,20 @@ async def main() -> None:
     # ────────── Optional explicit save ──────────
     if args.output_file:
         try:
-            excel_mgr.save_as(args.output_file)
-            logger.info(f"💾 Workbook saved to {args.output_file}")
+            # Ensure all changes are visible
+            excel_mgr.ensure_changes_applied()
+            
+            # Use the more robust save method
+            saved_path = excel_mgr.save_with_confirmation(args.output_file)
+            logger.info(f"💾 Workbook saved to {saved_path}")
         except Exception as e:
             logger.error(f"❌ Failed to save workbook: {e}")
+            # Try one more time with a default path
+            try:
+                saved_path = excel_mgr.save_with_confirmation()
+                logger.info(f"💾 Workbook saved to alternative location: {saved_path}")
+            except:
+                logger.error("All save attempts failed.")
 
 
 # Execute main() when run directly

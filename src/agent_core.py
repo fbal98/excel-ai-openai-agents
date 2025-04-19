@@ -21,7 +21,11 @@ from .tools import (
     set_cell_formula_tool,
     set_cell_values_tool,  # Bulk tool
     set_table_tool,        # Bulk write table tool
+    set_rows_tool,         # Bulk write rows starting at a given row
+    set_columns_tool,      # Bulk write columns starting at a given column
+    set_named_ranges_tool, # Disjoint named ranges
     insert_table_tool,     # Insert formatted table tool
+    copy_paste_range_tool, # Copy + paste‑special helper
     write_and_verify_range_tool,  # Composite write+verify
     get_cell_style_tool,          # Style inspectors
     get_range_style_tool,
@@ -30,6 +34,7 @@ from .tools import (
     CellStyle,     # Import type for clarity if needed later
 )
 from .context import AppContext
+from .hooks import SummaryHooks
 
 # Decorate tool functions with @function_tool and ensure detailed docstrings
 get_sheet_names_tool = function_tool(get_sheet_names_tool, strict_mode=False)
@@ -50,17 +55,30 @@ set_range_formula_tool = function_tool(set_range_formula_tool, strict_mode=False
 set_cell_formula_tool = function_tool(set_cell_formula_tool, strict_mode=False)
 set_cell_values_tool = function_tool(set_cell_values_tool, strict_mode=False)
 set_table_tool = function_tool(set_table_tool, strict_mode=False)
+set_rows_tool = function_tool(set_rows_tool, strict_mode=False)
+set_columns_tool = function_tool(set_columns_tool, strict_mode=False)
+copy_paste_range_tool = function_tool(copy_paste_range_tool, strict_mode=False)
+set_named_ranges_tool = function_tool(set_named_ranges_tool, strict_mode=False)
 save_workbook_tool = function_tool(save_workbook_tool, strict_mode=False)
-open_workbook_tool  = function_tool(open_workbook_tool, strict_mode=False)
-snapshot_tool       = function_tool(snapshot_tool, strict_mode=False)
-revert_snapshot_tool= function_tool(revert_snapshot_tool, strict_mode=False)
+open_workbook_tool = function_tool(open_workbook_tool, strict_mode=False)
+snapshot_tool = function_tool(snapshot_tool, strict_mode=False)
+revert_snapshot_tool = function_tool(revert_snapshot_tool, strict_mode=False)
 write_and_verify_range_tool = function_tool(write_and_verify_range_tool, strict_mode=False)
 get_cell_style_tool = function_tool(get_cell_style_tool, strict_mode=False)
 get_range_style_tool = function_tool(get_range_style_tool, strict_mode=False)
 insert_table_tool = function_tool(insert_table_tool, strict_mode=False)
 
 
-# Enhanced System Prompt based on research findings
+def _dynamic_instructions(wrapper: RunContextWrapper[AppContext], agent: Agent) -> str:  # noqa: D401
+    """
+    Combine the static SYSTEM_PROMPT with any running summary lines stored in
+    ``ctx.state["summary"]`` so the LLM always sees a concise recap without
+    replaying the full token history.
+    """
+    summary = wrapper.context.state.get("summary")
+    if summary:
+        return f"{SYSTEM_PROMPT}\n\n<progress_summary>\n{summary}\n</progress_summary>"
+    return SYSTEM_PROMPT
 
 SYSTEM_PROMPT="""
 You are a powerful **agentic Spreadsheet AI**, running inside the OpenAI Agents SDK.  
@@ -111,9 +129,14 @@ formulas, and styles.
 </error_handling>
 
 <data_writing>
-• For rectangular data, prefer `insert_table_tool` (headers + rows).  
-• For many scattered cells, use `set_cell_values_tool`.  
-• For single cells, use `set_cell_value_tool`.  
+• For rectangular data, **always** use `insert_table_tool` (headers + rows); *never* loop single writes row‑by‑row.
+• For row‑wise dumps that start at column A, use `set_rows_tool` (give *start_row* and the 2‑D list).
+• For column‑wise dumps that start at row 1, use `set_columns_tool` (give *start_col* and the 2‑D list).
+• For disjoint named ranges, use `set_named_ranges_tool` with a `{name: value|array}` mapping.
+• Whenever you need to update **two or more** cells—contiguous **or** scattered—batch them into **one** `set_cell_values_tool` call.
+• Whenever you need to update **two or more** cells—contiguous **or** scattered—batch them into **one** `set_cell_values_tool` call.
+• Reserve `set_cell_value_tool` strictly for truly solitary updates (≤ 1 cell in the entire turn).
+• Never iterate with repeated `set_cell_value_tool`; batch instead.
 • Never overwrite non‑empty cells unless the USER asked to.  
 • After writing, *immediately* verify critical cells with
   `write_and_verify_range_tool` or `get_range_values_tool`.
@@ -170,7 +193,8 @@ Do not attempt more than two corrective rounds in a single turn.
 """
 excel_assistant_agent = Agent[AppContext]( # Specify context type for clarity
     name="Excel Assistant",
-    instructions=SYSTEM_PROMPT,
+    instructions=_dynamic_instructions,
+    hooks=SummaryHooks(),
 
     tools=[
         get_sheet_names_tool,
@@ -189,7 +213,11 @@ excel_assistant_agent = Agent[AppContext]( # Specify context type for clarity
         set_cell_formula_tool,
         set_cell_values_tool,     # Bulk tool
         set_table_tool,           # Bulk write table tool
+        set_rows_tool,            # Bulk write rows starting at a given row
+        set_columns_tool,         # Bulk write columns starting at a given column
+        set_named_ranges_tool,    # Disjoint named ranges tool
         insert_table_tool,        # Table insertion (headers + data)
+        copy_paste_range_tool,    # Copy + paste‑special helper
         write_and_verify_range_tool,  # Bulk write + self‑check
         get_cell_style_tool,          # Style inspectors
         get_range_style_tool,
