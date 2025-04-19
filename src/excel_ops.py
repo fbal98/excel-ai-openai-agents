@@ -205,20 +205,16 @@ class ExcelManager:
             bold = style["font"].get("bold")
             if bold is not None:
                 try:
-                    rng.api.Font.Bold = bool(bold)
-                except:
-                    # Fallback to xlwings native API
                     rng.font.bold = bool(bold)
+                except:
+                    # Fallback to Excel API
+                    rng.api.Font.Bold = bool(bold)
 
         # Fill
         if "fill" in style and style["fill"] and "start_color" in style["fill"]:
             rgb = style["fill"]["start_color"]
-            color_int = _hex_argb_to_bgr_int(rgb)
-            try:
-                rng.api.Interior.Color = color_int
-            except:
-                # Fallback to xlwings native API
-                rng.color = color_int
+            rgb_tuple = _hex_argb_to_bgr_int(rgb)
+            rng.color = rgb_tuple
 
     # ──────────────────────────────
     #  Sheet management
@@ -237,10 +233,10 @@ class ExcelManager:
     #  Merge / unmerge
     # ──────────────────────────────
     def merge_cells_range(self, sheet_name: str, range_address: str) -> None:
-        self._require_sheet(sheet_name).range(range_address).api.Merge()
+        self._require_sheet(sheet_name).range(range_address).merge()
 
     def unmerge_cells_range(self, sheet_name: str, range_address: str) -> None:
-        self._require_sheet(sheet_name).range(range_address).api.UnMerge()
+        self._require_sheet(sheet_name).range(range_address).unmerge()
 
     # ──────────────────────────────
     #  Row / column sizing
@@ -382,9 +378,9 @@ class ExcelManager:
 
 
 # ╭────────────────────────── Helper functions ─────────────────────────╮
-def _hex_argb_to_bgr_int(argb_or_rgb: str) -> int:
+def _hex_argb_to_bgr_int(argb_or_rgb: str) -> tuple[int, int, int]:
     """
-    Convert 'FFAABBCC', '#AABBCC', or 'AABBCC' → integer BGR order required by Excel.
+    Convert 'FFAABBCC', '#AABBCC', or 'AABBCC' → (r, g, b) tuple.
     Alpha is discarded.
     """
     s = argb_or_rgb.lstrip("#")
@@ -392,9 +388,9 @@ def _hex_argb_to_bgr_int(argb_or_rgb: str) -> int:
         s = s[2:]
     if len(s) != 6:
         raise ValueError(f"Invalid RGB color '{argb_or_rgb}'")
-    r, g, b = s[0:2], s[2:4], s[4:6]
-    bgr_hex = b + g + r
-    return int(bgr_hex, 16)
+    r_hex, g_hex, b_hex = s[0:2], s[2:4], s[4:6]
+    r, g, b = int(r_hex, 16), int(g_hex, 16), int(b_hex, 16)
+    return (r, g, b)
 
 
 def _bgr_int_to_argb_hex(color_int: int) -> str:
