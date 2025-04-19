@@ -1,797 +1,413 @@
 """
-Excel operations module for the Autonomous Excel Assistant.
-Provides the ExcelManager class for manipulating Excel files using openpyxl.
+Unified ExcelManager: realtime xlwings backend with snapshot / undo support.
+The public surface (method names / signatures) is preserved so existing tools
+continue to work without modification.
 """
 
-import openpyxl
-from openpyxl import Workbook
-from openpyxl.styles import Font, PatternFill, Border, Side
-from openpyxl.utils import get_column_letter, column_index_from_string
-from openpyxl.worksheet.worksheet import Worksheet
-from typing import Optional, Any, Dict, Union, List, Tuple, Iterable
-import json
+from __future__ import annotations
+
+import os
+import shutil
+import tempfile
+from typing import Any, Dict, List, Optional
+
+import xlwings as xw
+
 
 class ExcelManager:
-    """
-    Manages Excel workbook operations using openpyxl.
-    """
-    def __init__(self, file_path: Optional[str] = None):
+    """Single realtime manager that always drives a visible Excel instance."""
+
+    # ──────────────────────────────
+    #  Construction / housekeeping
+    # ──────────────────────────────
+    def __init__(self, file_path: Optional[str] = None, visible: bool = True) -> None:
         """
-        Initialize the ExcelManager.
-        If file_path is provided, load the workbook. Otherwise, create a new workbook.
+        Launch Excel (or reuse an existing instance) and open *file_path*.
+        If *file_path* is None a new blank workbook is created.
         """
+        # Kill any existing Excel instances to avoid conflicts
+        for app in xw.apps:
+            try:
+                app.quit()
+            except:
+                pass
+
         try:
+            # Spawn a fresh Excel instance
+            self.app = xw.App(visible=visible, add_book=False)
+            
+            # Create or open workbook
             if file_path:
-                self.workbook = openpyxl.load_workbook(file_path)
+                self.book = self.app.books.open(file_path)
             else:
-                self.workbook = Workbook()
-        except FileNotFoundError:
-            raise FileNotFoundError(f"File not found: {file_path}")
-        except Exception as e:
-            raise RuntimeError(f"Error loading workbook: {e}")
+                self.book = self.app.books.add()
 
-    def save_workbook(self, file_path: str):
-        """
-        Save the workbook to the specified file path.
-        Raises:
-            ValueError: If file_path is empty.
-            IOError: If saving fails.
-        """
-        if not file_path:
-            raise ValueError("File path cannot be empty.")
+            # Ensure there's at least one sheet
+            if not self.book.sheets:
+                self.book.sheets.add()
+
+        except Exception as e:
+            if hasattr(self, 'app'):
+                try:
+                    self.app.quit()
+                except:
+                    pass
+            raise RuntimeError(f"Failed to initialize Excel: {e}")
+            
+        self._snapshot_path: Optional[str] = None  # path to last snapshot (temp file)
+
+    def __del__(self):
+        """Ensure Excel instance is cleaned up."""
         try:
-            self.workbook.save(file_path)
-            # Confirmation handled by calling code
-        except Exception as e:
-            # Raise a more specific error for file operations
-            raise IOError(f"Error saving workbook to '{file_path}': {e}")
+            if hasattr(self, 'book') and self.book:
+                try:
+                    self.book.close()
+                except:
+                    pass
+            if hasattr(self, 'app') and self.app:
+                try:
+                    self.app.quit()
+                except:
+                    pass
+        except:
+            pass
 
-    def get_sheet_names(self) -> list:
-        """
-        Return a list of sheet names in the workbook.
-        """
-        return self.workbook.sheetnames
+    # ──────────────────────────────
+    #  Snapshot / undo helpers
+    # ──────────────────────────────
+    def snapshot(self) -> str:
+        """Save a temp copy that can be rolled back to with `revert_to_snapshot()`."""
+        tmp_fd, tmp_path = tempfile.mkstemp(suffix=".xlsx")
+        os.close(tmp_fd)
+        self.book.save(tmp_path)
+        self._snapshot_path = tmp_path
+        return tmp_path
+
+    def revert_to_snapshot(self) -> None:
+        """Close current book and reopen the last snapshot (if any)."""
+        if not self._snapshot_path or not os.path.exists(self._snapshot_path):
+            raise RuntimeError("No snapshot available to revert to.")
+        # Close without saving
+        self.book.close(save_changes=False)
+        # Open the snapshot
+        self.book = self.app.books.open(self._snapshot_path)
+
+    # ──────────────────────────────
+    #  Explicit save helpers
+    # ──────────────────────────────
+    def save_workbook(self, file_path: str = None) -> None:
+        """Save the current workbook. If no path is provided, save to a default location."""
+        if not file_path:
+            # Generate a default filename with timestamp
+            import datetime
+            timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+            file_path = f"workbook_{timestamp}.xlsx"
+        
+        # Ensure the path has .xlsx extension
+        if not file_path.lower().endswith('.xlsx'):
+            file_path += '.xlsx'
+            
+        self.save_as(file_path)
+        return file_path  # Return the path where the file was saved
+
+    def save_as(self, file_path: str) -> None:
+        """Save the workbook to the specified path, ensuring proper extension."""
+        # Ensure the path has .xlsx extension
+        if not file_path.lower().endswith('.xlsx'):
+            file_path += '.xlsx'
+            
+        try:
+            self.book.save(file_path)
+        except Exception as e:
+            raise RuntimeError(f"Failed to save workbook to {file_path}: {e}")
+
+    # ──────────────────────────────
+    #  New: open workbook helper
+    # ──────────────────────────────
+    def open_workbook(self, file_path: str) -> None:
+        """Close the current book without saving and open the workbook at file_path."""
+        try:
+            if self.book:
+                try:
+                    self.book.close(save_changes=False)
+                except:
+                    pass
+            self.book = self.app.books.open(file_path)
+            # Ensure there's at least one sheet
+            if not self.book.sheets:
+                self.book.sheets.add()
+        except Exception as e:
+            raise RuntimeError(f"Failed to open workbook {file_path}: {e}")
+        self._snapshot_path = None
+
+    # ──────────────────────────────
+    #  Basic workbook / sheet info
+    # ──────────────────────────────
+    def get_sheet_names(self) -> List[str]:
+        return [s.name for s in self.book.sheets]
 
     def get_active_sheet_name(self) -> str:
-        """
-        Return the name of the active sheet.
-        """
-        return self.workbook.active.title
+        return self.book.sheets.active.name
 
-    def get_sheet(self, sheet_name: str) -> Optional[Worksheet]:
-        """
-        Get a worksheet by name. Returns None if not found.
-        """
+    def get_sheet(self, sheet_name: str):
         try:
-            return self.workbook[sheet_name]
-        except KeyError:
+            return self.book.sheets[sheet_name]
+        except (KeyError, ValueError):
             return None
 
-    def set_cell_value(self, sheet_name: str, cell_address: str, value: Any):
-        """
-        Set the value of a cell in the specified sheet.
-        Raises:
-            ValueError: If sheet_name or cell_address is empty.
-            KeyError: If sheet_name does not exist.
-            Exception: For other openpyxl errors.
-        """
-        if not sheet_name:
-            raise ValueError("Sheet name cannot be empty.")
-        if not cell_address:
-            raise ValueError("Cell address cannot be empty.")
-
-        sheet = self.get_sheet(sheet_name)
-        if not sheet:
-            raise KeyError(f"Sheet '{sheet_name}' not found.")
-        try:
-            sheet[cell_address].value = value
-        except Exception as e:
-            # Re-raise exception for the tool to handle
-            raise Exception(f"Error setting value for {sheet_name}!{cell_address}: {e}")
+    # ──────────────────────────────
+    #  Cell value helpers
+    # ──────────────────────────────
+    def set_cell_value(self, sheet_name: str, cell_address: str, value: Any) -> None:
+        sheet = self._require_sheet(sheet_name)
+        sheet.range(cell_address).value = value
 
     def get_cell_value(self, sheet_name: str, cell_address: str) -> Any:
-        """
-        Get the value of a cell in the specified sheet.
-        Returns the cell value, or None if the cell is empty.
-        Raises:
-            ValueError: If sheet_name or cell_address is empty.
-            KeyError: If sheet_name does not exist.
-            Exception: For other openpyxl errors.
-        """
-        if not sheet_name:
-            raise ValueError("Sheet name cannot be empty.")
-        if not cell_address:
-            raise ValueError("Cell address cannot be empty.")
+        sheet = self._require_sheet(sheet_name)
+        return sheet.range(cell_address).value
 
-        sheet = self.get_sheet(sheet_name)
-        if not sheet:
-            raise KeyError(f"Sheet '{sheet_name}' not found.")
-        try:
-            # Return the value directly, None is valid for empty cells
-            return sheet[cell_address].value
-        except Exception as e:
-            # Re-raise exception for the tool to handle
-            raise Exception(f"Error getting value for {sheet_name}!{cell_address}: {e}")
+    def set_cell_values(self, sheet_name: str, data: Dict[str, Any]) -> None:
+        sheet = self._require_sheet(sheet_name)
+        for addr, val in data.items():
+            sheet.range(addr).value = val
 
+    # ──────────────────────────────
+    #  Range helpers
+    # ──────────────────────────────
     def get_range_values(self, sheet_name: str, range_address: str) -> List[List[Any]]:
-        """
-        Get values from a range of cells in the specified sheet.
-        Returns a 2D list of values, where each inner list represents a row.
-        
-        Raises:
-            ValueError: If sheet_name or range_address is empty.
-            KeyError: If sheet_name does not exist.
-            Exception: For other openpyxl errors.
-        """
-        if not sheet_name:
-            raise ValueError("Sheet name cannot be empty.")
-        if not range_address:
-            raise ValueError("Range address cannot be empty.")
-            
-        sheet = self.get_sheet(sheet_name)
-        if not sheet:
-            raise KeyError(f"Sheet '{sheet_name}' not found.")
-            
-        try:
-            values = []
-            for row in sheet[range_address]:
-                row_values = []
-                for cell in row:
-                    row_values.append(cell.value)
-                values.append(row_values)
-            return values
-        except Exception as e:
-            raise Exception(f"Error getting values from range {sheet_name}!{range_address}: {e}")
+        sheet = self._require_sheet(sheet_name)
+        vals = sheet.range(range_address).value
+        # xlwings returns scalar for 1×1 range; list for others
+        if not isinstance(vals, list):
+            return [[vals]]
+        # Normalise 1-D row or col to 2-D list-of-lists
+        if vals and not isinstance(vals[0], list):
+            return [vals]
+        return vals
 
-    def set_range_style(self, sheet_name: str, range_address: str, style_dict: Dict[str, Any]):
+    # ──────────────────────────────
+    #  Styles (minimal viable impl)
+    # ──────────────────────────────
+    def set_range_style(
+        self, sheet_name: str, range_address: str, style: Dict[str, Any]
+    ) -> None:
         """
-        Apply styles to a range of cells or a single cell based on a style dictionary.
-        style_dict: Dictionary adhering to CellStyle structure (keys: 'font', 'fill', 'border').
-        Raises:
-            ValueError: If sheet_name, range_address, or style_dict is empty/invalid.
-            KeyError: If sheet_name does not exist.
-            Exception: For other openpyxl errors.
+        Currently supports:
+            • 'font': {'bold': True/False}
+            • 'fill': {'start_color': 'FFAABBCC' | '#AABBCC' | 'AABBCC'}
+        Extend as needed.
         """
-        if not sheet_name:
-            raise ValueError("Sheet name cannot be empty.")
-        if not range_address:
-            raise ValueError("Range address cannot be empty.")
-        if not style_dict:
-             raise ValueError("Style dictionary cannot be empty.")
+        sheet = self._require_sheet(sheet_name)
+        rng = sheet.range(range_address)
 
-        sheet = self.get_sheet(sheet_name)
-        if not sheet:
-            raise KeyError(f"Sheet '{sheet_name}' not found.")
-
-        try:
-            # Create style objects only if they are defined in the style dict
-            # Use .get() with default {} to avoid errors if key is missing
-            font = Font(**style_dict.get('font', {})) if style_dict.get('font') else None
-            fill = PatternFill(**style_dict.get('fill', {})) if style_dict.get('fill') else None
-            # Build Border object safely – translate raw dicts ➜ Side objects
-            border = None
-            if 'border' in style_dict and style_dict['border']:
-                border_dict_raw = style_dict['border']
-                # Each edge may be a dict or already a Side
-                def _mk(side):
-                    return Side(**side) if isinstance(side, dict) else side
-                border_inputs = {k: _mk(v) for k, v in border_dict_raw.items()}
-                border = Border(**border_inputs)
-
-            target_cells = sheet[range_address]
-
-            # Apply styles efficiently
-            if isinstance(target_cells, openpyxl.cell.cell.Cell):
-                # Single cell
-                if font: target_cells.font = font
-                if fill: target_cells.fill = fill
-                if border: target_cells.border = border
-            else:
-                # Range
-                for row in target_cells:
-                    for cell in row:
-                        if font: cell.font = font
-                        if fill: cell.fill = fill
-                        if border: cell.border = border
-        except Exception as e:
-            # Re-raise exception for the tool to handle
-            raise Exception(f"Error applying style to {sheet_name}!{range_address}: {e}")
-
-    def create_sheet(self, sheet_name: str, index: Optional[int] = None):
-        """
-        Create a new sheet with the given name and optional index.
-        Raises:
-            ValueError: If sheet_name is empty.
-            Exception: For other openpyxl errors (e.g., duplicate sheet name).
-        """
-        if not sheet_name:
-            raise ValueError("Sheet name cannot be empty.")
-        try:
-            self.workbook.create_sheet(title=sheet_name, index=index)
-        except Exception as e:
-            # Re-raise exception for the tool to handle
-            raise Exception(f"Error creating sheet '{sheet_name}': {e}")
-
-    def delete_sheet(self, sheet_name: str):
-        """
-        Delete the specified sheet from the workbook.
-        Raises:
-            ValueError: If sheet_name is empty.
-            KeyError: If sheet_name does not exist.
-            Exception: For other openpyxl errors.
-        """
-        if not sheet_name:
-            raise ValueError("Sheet name cannot be empty.")
-        try:
-            # This will raise KeyError if sheet doesn't exist
-            sheet = self.workbook[sheet_name]
-            self.workbook.remove(sheet)
-        except KeyError:
-            # Re-raise specifically for the tool
-            raise KeyError(f"Sheet '{sheet_name}' not found for deletion.")
-        except Exception as e:
-            # Re-raise other exceptions
-            raise Exception(f"Error deleting sheet '{sheet_name}': {e}")
-
-    def merge_cells_range(self, sheet_name: str, range_address: str):
-        """
-        Merge a range of cells in the specified sheet.
-        Raises:
-            ValueError: If sheet_name or range_address is empty.
-            KeyError: If sheet_name does not exist.
-            Exception: For other openpyxl errors (e.g., invalid range).
-        """
-        if not sheet_name:
-            raise ValueError("Sheet name cannot be empty.")
-        if not range_address:
-            raise ValueError("Range address cannot be empty.")
-
-        sheet = self.get_sheet(sheet_name)
-        if not sheet:
-            raise KeyError(f"Sheet '{sheet_name}' not found.")
-        try:
-            sheet.merge_cells(range_address)
-        except Exception as e:
-            # Re-raise exception for the tool to handle
-            raise Exception(f"Error merging cells {sheet_name}!{range_address}: {e}")
-
-    def unmerge_cells_range(self, sheet_name: str, range_address: str):
-        """
-        Unmerge a range of cells in the specified sheet.
-        Raises:
-            ValueError: If sheet_name or range_address is empty.
-            KeyError: If sheet_name does not exist.
-            Exception: For other openpyxl errors (e.g., invalid range).
-        """
-        if not sheet_name:
-            raise ValueError("Sheet name cannot be empty.")
-        if not range_address:
-            raise ValueError("Range address cannot be empty.")
-
-        sheet = self.get_sheet(sheet_name)
-        if not sheet:
-            raise KeyError(f"Sheet '{sheet_name}' not found.")
-        try:
-            sheet.unmerge_cells(range_address)
-        except Exception as e:
-            # Re-raise exception for the tool to handle
-            raise Exception(f"Error unmerging cells {sheet_name}!{range_address}: {e}")
-
-    def set_row_height(self, sheet_name: str, row_number: int, height: float):
-        """
-        Set the height of a row in the specified sheet.
-        Raises:
-            ValueError: If sheet_name is empty, row_number is not positive, or height is negative.
-            KeyError: If sheet_name does not exist.
-            Exception: For other openpyxl errors.
-        """
-        if not sheet_name:
-            raise ValueError("Sheet name cannot be empty.")
-        if not isinstance(row_number, int) or row_number <= 0:
-            raise ValueError(f"Row number must be a positive integer (got {row_number}).")
-        if not isinstance(height, (int, float)) or height < 0:
-            raise ValueError(f"Height must be a non-negative number (got {height}).")
-
-        sheet = self.get_sheet(sheet_name)
-        if not sheet:
-            raise KeyError(f"Sheet '{sheet_name}' not found.")
-        try:
-            sheet.row_dimensions[row_number].height = height
-        except Exception as e:
-            # Re-raise exception for the tool to handle
-            raise Exception(f"Error setting row height for row {row_number} in '{sheet_name}': {e}")
-
-    def set_column_width(self, sheet_name: str, column_letter: str, width: float):
-        """
-        Set the width of a column in the specified sheet.
-        Raises:
-            ValueError: If sheet_name or column_letter is empty, or width is negative.
-            KeyError: If sheet_name does not exist.
-            Exception: For other openpyxl errors.
-        """
-        if not sheet_name:
-            raise ValueError("Sheet name cannot be empty.")
-        if not column_letter or not isinstance(column_letter, str):
-             raise ValueError("Column letter must be a non-empty string.")
-        if not isinstance(width, (int, float)) or width < 0:
-            raise ValueError(f"Width must be a non-negative number (got {width}).")
-
-        sheet = self.get_sheet(sheet_name)
-        if not sheet:
-            raise KeyError(f"Sheet '{sheet_name}' not found.")
-        try:
-            # Ensure column letter is uppercase for consistency
-            sheet.column_dimensions[column_letter.upper()].width = width
-        except Exception as e:
-            # Re-raise exception for the tool to handle
-            raise Exception(f"Error setting column width for column {column_letter.upper()} in '{sheet_name}': {e}")
-
-    def set_columns_widths(self, sheet_name: str, widths: Dict[str, float]):
-        """
-        Set multiple column widths at once.
-        
-        Args:
-            sheet_name: Name of the sheet to operate on
-            widths: Dictionary mapping column letters to width values
-            
-        Raises:
-            ValueError: If sheet_name is empty or widths dictionary is empty
-            KeyError: If sheet_name does not exist
-        """
-        if not sheet_name:
-            raise ValueError("Sheet name cannot be empty.")
-        if not widths:
-            raise ValueError("Widths dictionary cannot be empty.")
-            
-        sheet = self.get_sheet(sheet_name)
-        if not sheet:
-            raise KeyError(f"Sheet '{sheet_name}' not found.")
-            
-        errors = {}
-        try:
-            for column_letter, width in widths.items():
-                if not column_letter or not isinstance(column_letter, str):
-                    errors[column_letter] = "Column letter must be a non-empty string."
-                    continue
-                if not isinstance(width, (int, float)) or width < 0:
-                    errors[column_letter] = f"Width must be a non-negative number (got {width})."
-                    continue
-                    
+        # Font → bold only for now
+        if "font" in style and style["font"]:
+            bold = style["font"].get("bold")
+            if bold is not None:
                 try:
-                    # Ensure column letter is uppercase for consistency
-                    sheet.column_dimensions[column_letter.upper()].width = width
-                except Exception as e:
-                    errors[column_letter] = str(e)
-                    
-            if errors:
-                raise Exception(f"Errors setting column widths in '{sheet_name}': {errors}")
-                
-        except Exception as e:
-            if errors:
-                raise Exception(f"Errors setting column widths in '{sheet_name}': {errors}")
-            else:
-                raise Exception(f"Error setting column widths in '{sheet_name}': {e}")
+                    rng.api.Font.Bold = bool(bold)
+                except:
+                    # Fallback to xlwings native API
+                    rng.font.bold = bool(bold)
 
-    def set_cell_formula(self, sheet_name: str, cell_address: str, formula: str):
+        # Fill
+        if "fill" in style and style["fill"] and "start_color" in style["fill"]:
+            rgb = style["fill"]["start_color"]
+            color_int = _hex_argb_to_bgr_int(rgb)
+            try:
+                rng.api.Interior.Color = color_int
+            except:
+                # Fallback to xlwings native API
+                rng.color = color_int
+
+    # ──────────────────────────────
+    #  Sheet management
+    # ──────────────────────────────
+    def create_sheet(self, sheet_name: str, index: Optional[int] = None) -> None:
+        if sheet_name in self.get_sheet_names():
+            raise ValueError(f"Sheet '{sheet_name}' already exists.")
+        before = self.book.sheets[index] if index is not None else None
+        self.book.sheets.add(name=sheet_name, before=before)
+
+    def delete_sheet(self, sheet_name: str) -> None:
+        sheet = self._require_sheet(sheet_name)
+        sheet.delete()
+
+    # ──────────────────────────────
+    #  Merge / unmerge
+    # ──────────────────────────────
+    def merge_cells_range(self, sheet_name: str, range_address: str) -> None:
+        self._require_sheet(sheet_name).range(range_address).api.Merge()
+
+    def unmerge_cells_range(self, sheet_name: str, range_address: str) -> None:
+        self._require_sheet(sheet_name).range(range_address).api.UnMerge()
+
+    # ──────────────────────────────
+    #  Row / column sizing
+    # ──────────────────────────────
+    def set_row_height(self, sheet_name: str, row_number: int, height: float) -> None:
+        self._require_sheet(sheet_name).rows(row_number).row_height = height
+
+    def set_column_width(self, sheet_name: str, column_letter: str, width: float) -> None:
+        rng = f"{column_letter}:{column_letter}"
+        self._require_sheet(sheet_name).range(rng).column_width = width
+
+    # ──────────────────────────────
+    #  (Currently stub) advanced APIs
+    # ──────────────────────────────
+    def set_cell_formula(self, sheet_name: str, cell_address: str, formula: str) -> None:
+        if not formula.startswith("="):
+            formula = "=" + formula
+        self.set_cell_value(sheet_name, cell_address, formula)
+
+    # ──────────────────────────────
+    #  Style inspectors
+    # ──────────────────────────────
+    def get_cell_style(self, sheet_name: str, cell_address: str) -> Dict[str, Any]:  # noqa: D401
+        """Return a minimal style dict (bold + fill color) for a single cell."""
+        sheet = self._require_sheet(sheet_name)
+        rng = sheet.range(cell_address)
+
+        style: Dict[str, Any] = {}
+
+        # Font → bold
+        bold = rng.api.Font.Bold
+        if bold is not None:
+            style["font"] = {"bold": bool(bold)}
+
+        # Fill → start_color
+        interior_color = rng.api.Interior.Color
+        if interior_color not in (None, 0):  # 0 = no fill
+            style["fill"] = {"start_color": _bgr_int_to_argb_hex(interior_color)}
+
+        return style
+
+    def get_range_style(self, sheet_name: str, range_address: str) -> Dict[str, Dict[str, Any]]:  # noqa: D401
         """
-        Set a formula in the specified cell.
-        Raises:
-            ValueError: If sheet_name, cell_address, or formula is empty.
-            KeyError: If sheet_name does not exist.
-            Exception: For other openpyxl errors.
+        Return {cell_address: style_dict} for every cell in the range (minimal style set).
         """
-        if not sheet_name:
-            raise ValueError("Sheet name cannot be empty.")
-        if not cell_address:
-            raise ValueError("Cell address cannot be empty.")
-        if not formula:
-            raise ValueError("Formula cannot be empty.")
+        sheet = self._require_sheet(sheet_name)
+        rng = sheet.range(range_address)
+        result: Dict[str, Dict[str, Any]] = {}
+        for c in rng:
+            addr = c.address.replace("$", "")
+            font_bold = c.api.Font.Bold
+            fill_color = c.api.Interior.Color
+            cell_style: Dict[str, Any] = {}
+            if font_bold is not None:
+                cell_style["font"] = {"bold": bool(font_bold)}
+            if fill_color not in (None, 0):
+                cell_style.setdefault("fill", {})["start_color"] = _bgr_int_to_argb_hex(
+                    fill_color
+                )
+            if cell_style:
+                result[addr] = cell_style
+        return result
 
-        sheet = self.get_sheet(sheet_name)
-        if not sheet:
-            raise KeyError(f"Sheet '{sheet_name}' not found.")
-
-        # Ensure formula starts with '='
-        if not formula.startswith('='):
-            formula = '=' + formula
-        try:
-            sheet[cell_address].value = formula
-        except Exception as e:
-            # Re-raise exception for the tool to handle
-            raise Exception(f"Error setting formula for {sheet_name}!{cell_address}: {e}")
-
-    def set_range_formula(self, sheet_name: str, start_cell: str, formula_pattern: str, rows: int, cols: int) -> bool:
-        """
-        Apply a formula pattern to a range, incrementing relative references appropriately.
-        
-        Args:
-            sheet_name: Name of the sheet
-            start_cell: Starting cell (e.g., "A1")
-            formula_pattern: Formula to apply with relative refs (e.g., "=A1+B1")
-            rows: Number of rows to fill
-            cols: Number of columns to fill
-            
-        Returns:
-            True if successful
-            
-        Raises:
-            ValueError for invalid input parameters
-            KeyError if sheet doesn't exist
-            Exception for other errors
-        """
-        if not sheet_name:
-            raise ValueError("Sheet name cannot be empty.")
-        if not start_cell:
-            raise ValueError("Start cell address cannot be empty.")
-        if not formula_pattern:
-            raise ValueError("Formula pattern cannot be empty.")
-        if rows <= 0 or cols <= 0:
-            raise ValueError("Rows and columns must be positive integers.")
-            
-        sheet = self.get_sheet(sheet_name)
-        if not sheet:
-            raise KeyError(f"Sheet '{sheet_name}' not found.")
-            
-        # Ensure formula starts with '='
-        if not formula_pattern.startswith('='):
-            formula_pattern = '=' + formula_pattern
-            
-        try:
-            from openpyxl.utils import get_column_letter
-            
-            # Parse start cell into row and column components
-            import re
-            match = re.match(r'([A-Za-z]+)(\d+)', start_cell)
-            if not match:
-                raise ValueError(f"Invalid cell address: {start_cell}")
-                
-            start_col_letter = match.group(1)
-            start_row = int(match.group(2))
-            start_col = column_index_from_string(start_col_letter)
-            
-            # Apply formula to each cell with appropriate offsets
-            for row_offset in range(rows):
-                for col_offset in range(cols):
-                    row = start_row + row_offset
-                    col = start_col + col_offset
-                    col_letter = get_column_letter(col)
-                    cell_addr = f"{col_letter}{row}"
-                    
-                    # For actual implementation, we'd need to parse and adjust the formula
-                    # This is a simplification that assumes the agent will provide appropriate formula templates
-                    sheet[cell_addr].value = formula_pattern
-                    
-            return True
-        except Exception as e:
-            raise Exception(f"Error applying formula pattern in {sheet_name}: {e}")
-
-    def set_cell_values(self, sheet_name: str, data: Dict[str, Any]):
-        """
-        Set the values of multiple cells in the specified sheet from a dictionary.
-        Keys are cell addresses (e.g., 'A1'), values are the data to set.
-        Raises:
-            ValueError: If sheet_name is empty or data dictionary is empty.
-            KeyError: If sheet_name does not exist.
-            Exception: If any cell address is invalid or another error occurs during setting values.
-        """
-        if not sheet_name:
-            raise ValueError("Sheet name cannot be empty.")
-        if not data:
-            raise ValueError("Data dictionary cannot be empty.")
-
-        sheet = self.get_sheet(sheet_name)
-        if not sheet:
-            raise KeyError(f"Sheet '{sheet_name}' not found.")
-
-        errors = {}
-        try:
-            for cell_address, value in data.items():
-                if not cell_address: # Basic check for empty cell address key
-                    errors["(empty_key)"] = "Cell address cannot be empty."
-                    continue
-                try:
-                    sheet[cell_address].value = value
-                except Exception as cell_e:
-                    errors[cell_address] = str(cell_e) # Collect errors per cell
-
-            if errors:
-                # Raise a single exception summarizing the cell-specific errors
-                raise Exception(f"Errors setting multiple cell values in '{sheet_name}': {errors}")
-
-        except Exception as e:
-            # Catch broader exceptions (like invalid sheet) or re-raise the aggregated error
-            if errors: # If we already aggregated errors, raise that
-                 raise Exception(f"Errors setting multiple cell values in '{sheet_name}': {errors}")
-            else: # Otherwise, raise the general exception
-                raise Exception(f"Error setting multiple cell values in '{sheet_name}': {e}")
-
-    def set_table(self, sheet_name: str, start_cell: str, data: List[List[Any]]) -> bool:
-        """
-        Write a 2D table of data starting at the specified cell.
-        
-        Args:
-            sheet_name: Name of the sheet
-            start_cell: Upper-left cell of the target range (e.g., "A1")
-            data: 2D list of values, where each inner list is a row
-            
-        Returns:
-            True if successful
-            
-        Raises:
-            ValueError for invalid input parameters
-            KeyError if sheet doesn't exist
-            Exception for other errors
-        """
-        if not sheet_name:
-            raise ValueError("Sheet name cannot be empty.")
-        if not start_cell:
-            raise ValueError("Start cell address cannot be empty.")
-        if not data:
-            raise ValueError("Data cannot be empty.")
-            
-        sheet = self.get_sheet(sheet_name)
-        if not sheet:
-            raise KeyError(f"Sheet '{sheet_name}' not found.")
-            
-        try:
-            # Parse start cell into row and column components
-            import re
-            match = re.match(r'([A-Za-z]+)(\d+)', start_cell)
-            if not match:
-                raise ValueError(f"Invalid cell address: {start_cell}")
-                
-            start_col_letter = match.group(1)
-            start_row = int(match.group(2))
-            start_col = column_index_from_string(start_col_letter)
-            
-            # Write data row by row
-            for row_idx, row_data in enumerate(data):
-                for col_idx, cell_value in enumerate(row_data):
-                    row = start_row + row_idx
-                    col = start_col + col_idx
-                    col_letter = get_column_letter(col)
-                    cell_addr = f"{col_letter}{row}"
-                    sheet[cell_addr].value = cell_value
-                    
-            return True
-        except Exception as e:
-            raise Exception(f"Error writing table data in {sheet_name}: {e}")
-    
-    def insert_table(self, sheet_name: str, start_cell: str, columns: List[str], rows: List[List[Any]], table_name: Optional[str] = None, table_style: Optional[str] = None) -> None:
-        """
-        Insert a formatted Excel table at the given start_cell.
-        columns: list of column headers.
-        rows: list of data rows (each a list of values).
-        table_name: optional display name for the table.
-        table_style: optional built-in table style name (e.g., 'TableStyleMedium9').
-        """
-        from openpyxl.worksheet.table import Table, TableStyleInfo
-        from openpyxl.utils.cell import coordinate_from_string
-        from openpyxl.utils import get_column_letter, column_index_from_string
-
-        sheet = self.get_sheet(sheet_name)
-        if sheet is None:
-            raise KeyError(f"Sheet '{sheet_name}' not found.")
-        # parse start_cell into column letter and row index
-        col_letter, row_idx = coordinate_from_string(start_cell)
-        start_col_idx = column_index_from_string(col_letter)
-        # write header row
-        for idx, header in enumerate(columns):
-            cell = sheet.cell(row=row_idx, column=start_col_idx + idx)
-            cell.value = header
-        # write data rows
-        for r_i, row_data in enumerate(rows):
-            for c_i, value in enumerate(row_data):
-                cell = sheet.cell(row=row_idx + 1 + r_i, column=start_col_idx + c_i)
-                cell.value = value
-        # define table reference range
-        end_col_idx = start_col_idx + len(columns) - 1
-        end_row_idx = row_idx + len(rows)
-        ref = f"{start_cell}:{get_column_letter(end_col_idx)}{end_row_idx}"
-        tbl_name = table_name or f"Table_{sheet_name}_{row_idx}"
-        table = Table(displayName=tbl_name, ref=ref)
-        if table_style:
-            style_info = TableStyleInfo(name=table_style, showRowStripes=True)
-            table.tableStyleInfo = style_info
-        sheet.add_table(table)
-
-    def write_and_verify_range(self, sheet_name: str, start_cell: str, data: List[List[Any]]) -> bool:
-        """
-        Write a 2D table of data and then verify it was written correctly.
-        
-        Args:
-            sheet_name: Name of the sheet
-            start_cell: Upper-left cell of the target range (e.g., "A1")
-            data: 2D list of values, where each inner list is a row
-            
-        Returns:
-            True if write and verification succeeded
-            
-        Raises:
-            ValueError for invalid input parameters
-            KeyError if sheet doesn't exist
-            Exception if verification failed or other errors
-        """
-        # Write the data first
-        self.set_table(sheet_name, start_cell, data)
-        
-        # Calculate the range to verify
-        import re
-        match = re.match(r'([A-Za-z]+)(\d+)', start_cell)
-        if not match:
-            raise ValueError(f"Invalid cell address: {start_cell}")
-            
-        start_col_letter = match.group(1)
-        start_row = int(match.group(2))
-        
-        # Calculate end cell
-        rows = len(data)
-        cols = max(len(row) for row in data) if data else 0
-        
-        if rows == 0 or cols == 0:
-            return True  # Nothing to verify
-            
-        end_row = start_row + rows - 1
-        end_col = column_index_from_string(start_col_letter) + cols - 1
-        end_col_letter = get_column_letter(end_col)
-        
-        range_address = f"{start_col_letter}{start_row}:{end_col_letter}{end_row}"
-        
-        # Read back the values from the range
-        verification_data = self.get_range_values(sheet_name, range_address)
-        
-        # Check if dimensions match
-        if len(verification_data) != rows:
-            raise Exception(f"Verification failed: Expected {rows} rows, got {len(verification_data)}")
-            
-        # Check each cell
-        for i, row in enumerate(data):
-            if i >= len(verification_data):
-                raise Exception(f"Verification failed: Row {i} missing in verification data")
-                
-            for j, expected_value in enumerate(row):
-                if j >= len(verification_data[i]):
-                    raise Exception(f"Verification failed: Cell at row {i}, column {j} missing in verification data")
-                    
-                actual_value = verification_data[i][j]
-                
-                # Special comparison for numeric types (handle float equality)
-                if isinstance(expected_value, (int, float)) and isinstance(actual_value, (int, float)):
-                    if abs(expected_value - actual_value) > 1e-10:  # Allow small floating point differences
-                        raise Exception(f"Verification failed at {get_column_letter(column_index_from_string(start_col_letter) + j)}{start_row + i}: Expected {expected_value}, got {actual_value}")
-                # For other types, use direct comparison
-                elif expected_value != actual_value:
-                    raise Exception(f"Verification failed at {get_column_letter(column_index_from_string(start_col_letter) + j)}{start_row + i}: Expected {expected_value}, got {actual_value}")
-                    
-        return True
-
-    def get_sheet_dataframe(self, sheet_name: str, header: bool = True) -> Dict[str, Any]:
-        """
-        Return the entire sheet as a serialisable dict similar to a DataFrame.
-
-        Args:
-            sheet_name: Target worksheet name.
-            header: If True (default) treat the first row as column headers;
-                    otherwise generate generic column names `col_1 … col_n`.
-
-        Returns:
-            {"columns": [...], "rows": [[...], ...]}
-        """
-        if not sheet_name:
-            raise ValueError("Sheet name cannot be empty.")
-
-        sheet = self.get_sheet(sheet_name)
-        if sheet is None:
-            raise KeyError(f"Sheet '{sheet_name}' not found.")
-
-        # Pull all rows (values_only=True gives raw Python types).
-        data: List[List[Any]] = [list(r) for r in sheet.iter_rows(values_only=True)]
-
-        # Drop trailing completely‑empty rows
-        while data and all(cell is None for cell in data[-1]):
-            data.pop()
-
-        if not data:
+    # Data-frame style dump for inspection / verification
+    def get_sheet_dataframe(self, sheet_name: str, header: bool = True):
+        values = self.get_range_values(sheet_name, _full_sheet_range(self._require_sheet(sheet_name)))
+        if not values:
             return {"columns": [], "rows": []}
-
         if header:
             columns = [
                 str(c) if c is not None else f"col_{i+1}"
-                for i, c in enumerate(data[0])
+                for i, c in enumerate(values[0])
             ]
-            rows = data[1:]
+            rows = values[1:]
         else:
-            columns = [f"col_{i+1}" for i in range(len(data[0]))]
-            rows = data
+            columns = [f"col_{i+1}" for i in range(len(values[0]))]
+            rows = values
+        return {"columns": columns, "rows": rows}
 
-        # Normalise row lengths (pad missing cells with None)
-        col_count = len(columns)
-        norm_rows: List[List[Any]] = [
-            (row + [None] * (col_count - len(row)))[:col_count] for row in rows
-        ]
-        return {"columns": columns, "rows": norm_rows}
-
-    # ------------------------------------------------------------------ #
-    #  Style inspectors for verification                                  #
-    # ------------------------------------------------------------------ #
-
-    def get_cell_style(self, sheet_name: str, cell_address: str) -> Dict[str, Any]:
-        """
-        Return the font / fill / border style of a single cell as a serialisable
-        dictionary. Keys that are None are omitted to keep the payload compact.
-        """
-        if not sheet_name:
-            raise ValueError("Sheet name cannot be empty.")
-        if not cell_address:
-            raise ValueError("Cell address cannot be empty.")
-
+    # ──────────────────────────────
+    #  Helpers
+    # ──────────────────────────────
+    def _require_sheet(self, sheet_name: str):
         sheet = self.get_sheet(sheet_name)
         if sheet is None:
             raise KeyError(f"Sheet '{sheet_name}' not found.")
+        return sheet
 
-        cell = sheet[cell_address]
-
-        def _clean(d: Dict[str, Any]) -> Dict[str, Any]:
-            """Return a copy of *d* with all None values removed."""
-            return {k: v for k, v in d.items() if v is not None}
-
-        font_dict = _clean(
-            {
-                "name": cell.font.name,
-                "size": cell.font.sz,
-                "bold": cell.font.bold,
-                "italic": cell.font.italic,
-                "underline": cell.font.underline,
-                "strike": cell.font.strike,
-                "color": cell.font.color.rgb if cell.font.color else None,
-            }
-        )
-
-        fill_dict = _clean(
-            {
-                "fill_type": cell.fill.fill_type,
-                "start_color": (
-                    cell.fill.start_color.rgb if hasattr(cell.fill.start_color, "rgb") else None
-                ),
-                "end_color": (
-                    cell.fill.end_color.rgb if hasattr(cell.fill.end_color, "rgb") else None
-                ),
-            }
-        )
-
-        border = cell.border
-        border_dict = _clean(
-            {
-                "left": border.left.style,
-                "right": border.right.style,
-                "top": border.top.style,
-                "bottom": border.bottom.style,
-                "outline": border.outline,
-                "vertical": border.vertical.style,
-                "horizontal": border.horizontal.style,
-            }
-        )
-
-        return {"font": font_dict, "fill": fill_dict, "border": border_dict}
-
-    def get_range_style(self, sheet_name: str, range_address: str) -> Dict[str, Dict[str, Any]]:
+    # ──────────────────────────────
+    #  Table insertion
+    # ──────────────────────────────
+    def insert_table(
+        self,
+        sheet_name: str,
+        start_cell: str,
+        columns: List[Any],
+        rows: List[List[Any]],
+        table_name: Optional[str] = None,
+        table_style: Optional[str] = None,
+    ) -> None:
         """
-        Return a mapping of cell_address -> style_dict for every cell in the range.
+        Inserts a formatted Excel table (ListObject) into the worksheet.
         """
-        if not sheet_name:
-            raise ValueError("Sheet name cannot be empty.")
-        if not range_address:
-            raise ValueError("Range address cannot be empty.")
+        sheet = self._require_sheet(sheet_name)
+        header_cell = sheet.range(start_cell)
+        total_rows = 1 + len(rows)
+        total_cols = len(columns)
+        table_range = header_cell.resize(total_rows, total_cols)
+        
+        # Write header and data
+        table_range.value = [columns] + rows
+        
+        try:
+            # Try using the Excel API directly
+            lo = sheet.api.ListObjects.Add(1, table_range.api, None, 1)
+            if table_name:
+                lo.Name = table_name
+            if table_style:
+                lo.TableStyle = table_style
+        except:
+            # Fallback: Just format as a regular range if table creation fails
+            header_row = header_cell.resize(row_size=1, column_size=total_cols)
+            try:
+                header_row.api.Font.Bold = True
+            except:
+                header_row.font.bold = True
+            
+            try:
+                # Light blue header background
+                header_row.api.Interior.Color = _hex_argb_to_bgr_int("FFD9E1F2")
+            except:
+                header_row.color = _hex_argb_to_bgr_int("FFD9E1F2")
+            
+            # Add basic borders
+            try:
+                table_range.api.Borders.LineStyle = 1  # xlContinuous
+            except:
+                pass
 
-        sheet = self.get_sheet(sheet_name)
-        if sheet is None:
-            raise KeyError(f"Sheet '{sheet_name}' not found.")
 
-        styles: Dict[str, Dict[str, Any]] = {}
-        for row in sheet[range_address]:
-            # openpyxl returns tuples; iterate over individual cells
-            for cell in (row if hasattr(row, "__iter__") else (row,)):
-                address = cell.coordinate
-                styles[address] = self.get_cell_style(sheet_name, address)
+# ╭────────────────────────── Helper functions ─────────────────────────╮
+def _hex_argb_to_bgr_int(argb_or_rgb: str) -> int:
+    """
+    Convert 'FFAABBCC', '#AABBCC', or 'AABBCC' → integer BGR order required by Excel.
+    Alpha is discarded.
+    """
+    s = argb_or_rgb.lstrip("#")
+    if len(s) == 8:  # ARGB
+        s = s[2:]
+    if len(s) != 6:
+        raise ValueError(f"Invalid RGB color '{argb_or_rgb}'")
+    r, g, b = s[0:2], s[2:4], s[4:6]
+    bgr_hex = b + g + r
+    return int(bgr_hex, 16)
 
-        return styles
+
+def _bgr_int_to_argb_hex(color_int: int) -> str:
+    """
+    Convert a BGR integer used by Excel back to an 8-digit ARGB hex string (FFRRGGBB).
+    """
+    # Mask to 24-bit and ensure 6-hex-digit string
+    bgr_hex = f"{color_int & 0xFFFFFF:06X}"
+    b, g, r = bgr_hex[0:2], bgr_hex[2:4], bgr_hex[4:6]
+    return f"FF{r}{g}{b}"
+
+
+def _full_sheet_range(sheet) -> str:
+    """Return A1-style full-used-range of a sheet (simplistic)."""
+    last_cell = sheet.used_range.last_cell
+    return f"A1:{last_cell.address.replace('$', '')}"

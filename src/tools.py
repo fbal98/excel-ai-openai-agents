@@ -49,14 +49,37 @@ class CellStyle(TypedDict, total=False):
 
 # All tool functions are ready for @function_tool decoration.
 
+# Tool: Open workbook
+def open_workbook_tool(ctx: RunContextWrapper[AppContext], file_path: str) -> Any:
+    """
+    Opens or attaches to an Excel workbook at the given path.
+
+    Args:
+        ctx (RunContextWrapper[AppContext]): Agent context containing the ExcelManager.
+        file_path (str): Path to the Excel workbook to open or attach.
+
+    Returns:
+        bool: True if the workbook was opened successfully.
+        dict: {'error': str} if an error occurred.
+    """
+    try:
+        # Delegate to ExcelManager and propagate its return value (usually None).
+        return ctx.context.excel_manager.open_workbook(file_path)
+    except Exception as e:
+        print(f"[TOOL ERROR] open_workbook_tool: {e}")
+        return {"error": f"Failed to open workbook '{file_path}': {e}"}
+
 # Tool: Get all sheet names
 def get_sheet_names_tool(ctx: RunContextWrapper[AppContext]) -> Any:
     """
-    Returns a list of all sheet names in the workbook.
+    Retrieves all worksheet names in the current Excel workbook.
+
     Args:
-        ctx: Agent context (injected automatically).
+        ctx (RunContextWrapper[AppContext]): Agent context containing the ExcelManager.
+
     Returns:
-        List of sheet names, or an error message.
+        List[str]: A list of worksheet names on success.
+        dict: {'error': str} if an error occurred.
     """
     try:
         return ctx.context.excel_manager.get_sheet_names()
@@ -68,11 +91,14 @@ def get_sheet_names_tool(ctx: RunContextWrapper[AppContext]) -> Any:
 # Tool: Get active sheet name
 def get_active_sheet_name_tool(ctx: RunContextWrapper[AppContext]) -> Any:
     """
-    Returns the name of the active sheet in the workbook.
+    Retrieves the name of the currently active worksheet.
+
     Args:
-        ctx: Agent context (injected automatically).
+        ctx (RunContextWrapper[AppContext]): Agent context containing the ExcelManager.
+
     Returns:
-        Active sheet name, or an error message.
+        str: Name of the active sheet on success.
+        dict: {'error': str} if an error occurred.
     """
     try:
         return ctx.context.excel_manager.get_active_sheet_name()
@@ -81,16 +107,19 @@ def get_active_sheet_name_tool(ctx: RunContextWrapper[AppContext]) -> Any:
         return {"error": f"Failed to get active sheet name: {e}"}
 
 # Tool: Set cell value
-def set_cell_value_tool(ctx: RunContextWrapper[AppContext], sheet_name: str, cell_address: str, value: str) -> Any:
+def set_cell_value_tool(ctx: RunContextWrapper[AppContext], sheet_name: str, cell_address: str, value: Any) -> Any:
     """
-    Sets the value of a single cell in the specified sheet. The value will be passed as a string.
+    Sets the value of a single cell.
+
     Args:
-        ctx: Agent context (injected automatically).
-        sheet_name: Name of the sheet.
-        cell_address: Cell address (e.g., 'A1').
-        value: Value to set (as a string).
+        ctx (RunContextWrapper[AppContext]): Agent context containing the ExcelManager.
+        sheet_name (str): Name of the worksheet.
+        cell_address (str): Cell address in A1 notation (e.g., 'B2').
+        value (Any): The value to set in the cell (number, text, date, or formula).
+
     Returns:
-        True if successful, or an error dictionary.
+        bool: True if the cell was updated successfully.
+        dict: {'error': str} if an error occurred.
     """
     print(f"[TOOL] set_cell_value_tool: {sheet_name}!{cell_address} value={value}")
     # --- Input Validation ---
@@ -101,8 +130,7 @@ def set_cell_value_tool(ctx: RunContextWrapper[AppContext], sheet_name: str, cel
     # Note: Validating 'value: Any' is complex; rely on underlying function for now.
     # --- End Validation ---
     try:
-        ctx.context.excel_manager.set_cell_value(sheet_name, cell_address, value)
-        return True
+        return ctx.context.excel_manager.set_cell_value(sheet_name, cell_address, value)
     except Exception as e:
         print(f"[TOOL ERROR] set_cell_value_tool: {e}")
         return {"error": f"Exception setting cell value for {sheet_name}!{cell_address}: {e}"}
@@ -111,13 +139,16 @@ def set_cell_value_tool(ctx: RunContextWrapper[AppContext], sheet_name: str, cel
 def get_cell_value_tool(ctx: RunContextWrapper[AppContext], sheet_name: str, cell_address: str) -> Any:
     print(f"[TOOL] get_cell_value_tool: {sheet_name}!{cell_address}")
     """
-    Gets the value of a cell in the specified sheet.
+    Retrieves the value from a single cell.
+
     Args:
-        ctx: Agent context (injected automatically).
-        sheet_name: Name of the sheet.
-        cell_address: Cell address (e.g., 'A1').
+        ctx (RunContextWrapper[AppContext]): Agent context containing the ExcelManager.
+        sheet_name (str): Name of the worksheet.
+        cell_address (str): Cell address in A1 notation (e.g., 'C3').
+
     Returns:
-        Cell value, or an error message.
+        Any: The cell value (None if empty).
+        dict: {'error': str} if an error occurred.
     """
     # --- Input Validation ---
     if not sheet_name:
@@ -126,67 +157,51 @@ def get_cell_value_tool(ctx: RunContextWrapper[AppContext], sheet_name: str, cel
         return {"error": "Tool 'get_cell_value_tool' failed: 'cell_address' cannot be empty."}
     # --- End Validation ---
     try:
-        value = ctx.context.excel_manager.get_cell_value(sheet_name, cell_address)
-        # Allow returning None if cell is genuinely empty, but catch exceptions
-        return value
+        return ctx.context.excel_manager.get_cell_value(sheet_name, cell_address)
     except Exception as e:
         print(f"[TOOL ERROR] get_cell_value_tool: {e}")
         return {"error": f"Exception getting cell value for {sheet_name}!{cell_address}: {e}"}
 
-# Tool: Get range of cell values
 def get_range_values_tool(ctx: RunContextWrapper[AppContext], sheet_name: str, range_address: str) -> Any:
     """
-    Retrieves values for a rectangular range of cells in the specified sheet.
+    Retrieves values from a rectangular cell range using the unified ExcelManager.
+
     Args:
-        ctx: Agent context (injected automatically).
-        sheet_name: Name of the sheet.
-        range_address: Excel range (e.g., 'A1:C5').
+        ctx (RunContextWrapper[AppContext]): Agent context containing the ExcelManager.
+        sheet_name (str): Name of the worksheet.
+        range_address (str): Excel range in A1 notation (e.g., 'A1:C5').
+
     Returns:
-        A dict with 'values' as a list of rows (each row is a list of cell values),
-        or an 'error' message if failed.
+        List[List[Any]]: 2‑D array of values on success.
+        dict: {'error': str} if an error occurred.
     """
     print(f"[TOOL] get_range_values_tool: {sheet_name}!{range_address}")
-    # Validation
+    # Input validation
     if not sheet_name:
         return {"error": "Tool 'get_range_values_tool' failed: 'sheet_name' cannot be empty."}
     if not range_address:
         return {"error": "Tool 'get_range_values_tool' failed: 'range_address' cannot be empty."}
     try:
-        ws = ctx.context.excel_manager.get_sheet(sheet_name)
-        if ws is None:
-            return {"error": f"Sheet '{sheet_name}' not found."}
-        # Fetch cells in range
-        cells = ws[range_address]
-        # Normalize to list of rows
-        # openpyxl returns a single cell or tuple of tuples
-        if not hasattr(cells, '__iter__') or isinstance(cells, ctx.context.excel_manager.workbook.__class__):
-            # Single cell case
-            return {"values": [[cells.value]]}
-        rows = []
-        for row in cells:
-            # row may be a tuple for range or a single cell
-            if hasattr(row, '__iter__'):
-                rows.append([cell.value for cell in row])
-            else:
-                rows.append([row.value])
-        return {"values": rows}
+        return ctx.context.excel_manager.get_range_values(sheet_name, range_address)
     except Exception as e:
         print(f"[TOOL ERROR] get_range_values_tool: {e}")
         return {"error": f"Exception getting range values for {sheet_name}!{range_address}: {e}"}
-
 # Tool: Set range style
 # The SDK automatically handles JSON conversion to the Pydantic/TypedDict model.
 def set_range_style_tool(ctx: RunContextWrapper[AppContext], sheet_name: str, range_address: str, style: CellStyle) -> Any:
     print(f"[TOOL] set_range_style_tool: {sheet_name}!{range_address} style={style}")
     """
-    Applies styles to a range of cells based on a style description dictionary.
+    Applies formatting styles to a cell range.
+
     Args:
-        ctx: Agent context (injected automatically).
-        sheet_name: Name of the sheet.
-        range_address: Excel range (e.g., 'A1:B2').
-        style_json: Style dictionary adhering to CellStyle structure (keys: 'font', 'fill', 'border').
+        ctx (RunContextWrapper[AppContext]): Agent context containing the ExcelManager.
+        sheet_name (str): Name of the worksheet.
+        range_address (str): Excel range in A1 notation (e.g., 'A1:B2').
+        style (CellStyle): Dictionary defining 'font', 'fill', and 'border' styles.
+
     Returns:
-        True if successful, or an error message.
+        bool: True if styles applied successfully.
+        dict: {'error': str} if an error occurred.
     """
     # --- Input Validation ---
     if not sheet_name:
@@ -197,8 +212,7 @@ def set_range_style_tool(ctx: RunContextWrapper[AppContext], sheet_name: str, ra
         return {"error": "Tool 'set_range_style_tool' failed: 'style' dictionary cannot be empty."}
     # --- End Validation ---
     try:
-        ctx.context.excel_manager.set_range_style(sheet_name, range_address, style)
-        return True
+        return ctx.context.excel_manager.set_range_style(sheet_name, range_address, style)
     except Exception as e:
         print(f"[TOOL ERROR] set_range_style_tool: {e}")
         return {"error": f"Exception applying cell style to {sheet_name}!{range_address}: {e}"}
@@ -221,8 +235,7 @@ def create_sheet_tool(ctx: RunContextWrapper[AppContext], sheet_name: str, index
     # Optional: Add check for invalid characters in sheet names if needed, though openpyxl might handle this.
     # --- End Validation ---
     try:
-        ctx.context.excel_manager.create_sheet(sheet_name, index)
-        return True
+        return ctx.context.excel_manager.create_sheet(sheet_name, index)
     except Exception as e:
         print(f"[TOOL ERROR] create_sheet_tool: {e}")
         return {"error": f"Exception creating sheet '{sheet_name}': {e}"}
@@ -243,10 +256,8 @@ def delete_sheet_tool(ctx: RunContextWrapper[AppContext], sheet_name: str) -> An
         return {"error": "Tool 'delete_sheet_tool' failed: 'sheet_name' cannot be empty."}
     # --- End Validation ---
     try:
-        result = ctx.context.excel_manager.delete_sheet(sheet_name)
-        if not result:
-            return {"error": f"Failed to delete sheet '{sheet_name}' (Operation returned false)"}
-        return True
+        # Delegate deletion and propagate its return (usually None).
+        return ctx.context.excel_manager.delete_sheet(sheet_name)
     except Exception as e:
         print(f"[TOOL ERROR] delete_sheet_tool: {e}")
         return {"error": f"Exception deleting sheet '{sheet_name}': {e}"}
@@ -270,8 +281,7 @@ def merge_cells_range_tool(ctx: RunContextWrapper[AppContext], sheet_name: str, 
         return {"error": "Tool 'merge_cells_range_tool' failed: 'range_address' cannot be empty."}
     # --- End Validation ---
     try:
-        ctx.context.excel_manager.merge_cells_range(sheet_name, range_address)
-        return True
+        return ctx.context.excel_manager.merge_cells_range(sheet_name, range_address)
     except Exception as e:
         print(f"[TOOL ERROR] merge_cells_range_tool: {e}")
         return {"error": f"Exception merging cells {sheet_name}!{range_address}: {e}"}
@@ -295,8 +305,7 @@ def unmerge_cells_range_tool(ctx: RunContextWrapper[AppContext], sheet_name: str
         return {"error": "Tool 'unmerge_cells_range_tool' failed: 'range_address' cannot be empty."}
     # --- End Validation ---
     try:
-        ctx.context.excel_manager.unmerge_cells_range(sheet_name, range_address)
-        return True
+        return ctx.context.excel_manager.unmerge_cells_range(sheet_name, range_address)
     except Exception as e:
         print(f"[TOOL ERROR] unmerge_cells_range_tool: {e}")
         return {"error": f"Exception unmerging cells {sheet_name}!{range_address}: {e}"}
@@ -324,8 +333,7 @@ def set_row_height_tool(ctx: RunContextWrapper[AppContext], sheet_name: str, row
         return {"error": f"Tool 'set_row_height_tool' failed: 'height' must be a non-negative number (got {height})."}
     # --- End Validation ---
     try:
-        ctx.context.excel_manager.set_row_height(sheet_name, row_number, height)
-        return True
+        return ctx.context.excel_manager.set_row_height(sheet_name, row_number, height)
     except Exception as e:
         print(f"[TOOL ERROR] set_row_height_tool: {e}")
         return {"error": f"Exception setting row height for row {row_number} in '{sheet_name}': {e}"}
@@ -353,8 +361,7 @@ def set_column_width_tool(ctx: RunContextWrapper[AppContext], sheet_name: str, c
         return {"error": f"Tool 'set_column_width_tool' failed: 'width' must be a non-negative number (got {width})."}
     # --- End Validation ---
     try:
-        ctx.context.excel_manager.set_column_width(sheet_name, column_letter.upper(), width)
-        return True
+        return ctx.context.excel_manager.set_column_width(sheet_name, column_letter.upper(), width)
     except Exception as e:
         print(f"[TOOL ERROR] set_column_width_tool: {e}")
         return {"error": f"Exception setting column width for column {column_letter.upper()} in '{sheet_name}': {e}"}
@@ -381,15 +388,14 @@ def set_cell_formula_tool(ctx: RunContextWrapper[AppContext], sheet_name: str, c
         return {"error": "Tool 'set_cell_formula_tool' failed: 'formula' cannot be empty."}
     # --- End Validation ---
     try:
-        ctx.context.excel_manager.set_cell_formula(sheet_name, cell_address, formula)
-        return True
+        return ctx.context.excel_manager.set_cell_formula(sheet_name, cell_address, formula)
     except Exception as e:
         print(f"[TOOL ERROR] set_cell_formula_tool: {e}")
         return {"error": f"Exception setting cell formula for {sheet_name}!{cell_address}: {e}"}
 
 # Tool: Set multiple cell values
 class CellValueMap(TypedDict):
-    """A mapping from cell addresses (e.g., 'A1') to values (as strings)."""
+    """A mapping from cell addresses (e.g., 'A1') to values of any type (number, text, date, etc.)."""
     # This TypedDict represents a dictionary like: {"A1": "value1", "B2": "value2"}
     # It doesn't need explicit fields defined here because it acts as a type hint
     # for arbitrary key-value pairs where keys are strings (cell addresses)
@@ -406,7 +412,7 @@ class SetCellValuesResult(TypedDict, total=False):
 def set_cell_values_tool(
     ctx: RunContextWrapper[AppContext],
     sheet_name: str,
-    data: Dict[str, str]
+    data: Dict[str, Any]
 ) -> SetCellValuesResult:
     # --- Input Validation ---
     if not sheet_name:
@@ -422,7 +428,7 @@ def set_cell_values_tool(
     Args:
         ctx: Agent context (injected automatically).
         sheet_name: Name of the sheet.
-        data: Dictionary mapping cell addresses (e.g., 'A1') to string values to set.
+        data: Dictionary mapping cell addresses (e.g., 'A1') to values of any supported Excel type.
     Returns:
         A result dict with 'success' True if successful, or 'error' message if failed.
     """
@@ -471,7 +477,20 @@ def insert_table_tool(
     table_style: Optional[str] = None,
 ) -> Any:
     """
-    Inserts a formatted Excel table with headers and data in one call.
+    Inserts a formatted Excel table (ListObject) into the worksheet.
+
+    Args:
+        ctx (RunContextWrapper[AppContext]): Agent context containing the ExcelManager.
+        sheet_name (str): Worksheet to insert the table into.
+        start_cell (str): Top-left cell for the table in A1 notation (e.g., 'A1').
+        columns (List[Any]): Header names for each column.
+        rows (List[List[Any]]): Data rows matching the headers.
+        table_name (Optional[str]): Optional name for the Excel table.
+        table_style (Optional[str]): Optional Excel table style (e.g., 'TableStyleMedium2').
+
+    Returns:
+        bool: True if table inserted successfully.
+        dict: {'error': str} if an error occurred.
     """
     try:
         ctx.context.excel_manager.insert_table(sheet_name, start_cell, columns, rows, table_name, table_style)
@@ -499,14 +518,22 @@ def set_range_formula_tool(ctx: RunContextWrapper[AppContext],
     Apply *template* row‑wise to the leftmost cell in each row of *range_address*.
     Example: template='=SUM(B{row}:E{row})' on F2:F6.
     """
+    # Input validation
+    if not sheet_name:
+        return {"error": "Tool 'set_range_formula_tool' failed: 'sheet_name' cannot be empty."}
+    if not range_address:
+        return {"error": "Tool 'set_range_formula_tool' failed: 'range_address' cannot be empty."}
     try:
-        ws = ctx.context.excel_manager.get_sheet(sheet_name)
-        for row in ws[range_address]:
-            r = row[0].row
-            row[0].value = template.format(row=r)
+        start_cell, end_cell = range_address.split(":")
+        col_letter, row_start = coordinate_from_string(start_cell)
+        _, row_end = coordinate_from_string(end_cell)
+        for r in range(row_start, row_end + 1):
+            address = f"{col_letter}{r}"
+            ctx.context.excel_manager.set_cell_formula(sheet_name, address, template.format(row=r))
         return True
     except Exception as e:
-        return {"error": str(e)}
+        print(f"[TOOL ERROR] set_range_formula_tool: {e}")
+        return {"error": f"Exception applying range formula for {sheet_name}!{range_address}: {e}"}
 
 # ------------------------------------------------------------------ #
 #  Composite write‑and‑verify tool                                   #
@@ -522,10 +549,17 @@ def write_and_verify_range_tool(
     data: Dict[str, str],
 ) -> WriteVerifyResult:
     """
-    Bulk‑write the provided cell→value mapping, then immediately read the same
-    cells back and compare. Returns {"success": True} on a perfect match, or
-    {"success": False, "diff": {...}} where diff maps each mismatching cell to
-    {"expected": value, "actual": actual_value}.
+    Writes multiple cells and verifies the write by reading back the values.
+
+    Args:
+        ctx (RunContextWrapper[AppContext]): Agent context containing the ExcelManager.
+        sheet_name (str): Name of the worksheet.
+        data (Dict[str, Any]): Mapping of cell addresses to expected values.
+
+    Returns:
+        dict: {'success': True} if all values match.
+              {'success': False, 'diff': dict} where 'diff' maps each mismatched cell
+              to {'expected': Any, 'actual': Any}.
     """
     if not sheet_name:
         return {"success": False, "diff": {"error": "'sheet_name' cannot be empty."}}
@@ -597,17 +631,52 @@ def get_range_style_tool(
         return {"error": str(e)}
 
 # ------------------------------------------------------------------ #
+#  New: Snapshot and revert tools                                    #
+# ------------------------------------------------------------------ #
+def snapshot_tool(ctx: RunContextWrapper[AppContext]) -> Any:
+    """
+    Saves a temporary snapshot of the current workbook state.
+
+    Args:
+        ctx (RunContextWrapper[AppContext]): Agent context containing the ExcelManager.
+
+    Returns:
+        dict: {'snapshot_path': str} path to the saved snapshot file.
+        dict: {'error': str} if an error occurred.
+    """
+    try:
+        path = ctx.context.excel_manager.snapshot()
+        return {"snapshot_path": path}
+    except Exception as e:
+        print(f"[TOOL ERROR] snapshot_tool: {e}")
+        return {"error": f"Failed to take snapshot: {e}"}
+
+def revert_snapshot_tool(ctx: RunContextWrapper[AppContext]) -> Any:
+    """
+    Reverts the workbook to the last snapshot taken.
+    """
+    try:
+        # Propagate manager return value (None on success).
+        return ctx.context.excel_manager.revert_to_snapshot()
+    except Exception as e:
+        print(f"[TOOL ERROR] revert_snapshot_tool: {e}")
+        return {"error": f"Failed to revert to snapshot: {e}"}
+
+# ------------------------------------------------------------------ #
 #  (Existing) Save workbook tool                                     #
 # ------------------------------------------------------------------ #
 # Tool: Save workbook
 def save_workbook_tool(ctx: RunContextWrapper[AppContext], file_path: str) -> Any:
     """
-    Saves the workbook to the specified file path.
+    Saves the current workbook to the given file path.
+
     Args:
-        ctx: Agent context (injected automatically).
-        file_path: Path to save the workbook.
+        ctx (RunContextWrapper[AppContext]): Agent context containing the ExcelManager.
+        file_path (str): Destination file path where the workbook should be saved.
+
     Returns:
-        True if successful, or an error message.
+        bool: True if saved successfully.
+        dict: {'error': str} if an error occurred.
     """
     print(f"[TOOL] save_workbook_tool: path={file_path}")
     # --- Input Validation ---
