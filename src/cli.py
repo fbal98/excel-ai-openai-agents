@@ -103,23 +103,35 @@ async def main() -> None:
         print("DEBUG: Entering interactive mode block")
         chat: list[dict[str, str]] = []
         print("Hello! How can I help you today?")
+        print("(Enter your message, use multiple lines if needed. Submit with an empty line)")
         while True:
             try:
-                print("DEBUG: Waiting for input...")
-                user = input("> ")
-                print(f"DEBUG: Received input: {user}")
+                print("DEBUG: Waiting for multi-line input...")
+                lines = []
+                while True:
+                    line = input("> " if not lines else "... ")  # Different prompt for continuation lines
+                    if not line:
+                        break
+                    lines.append(line)
+                user = "\n".join(lines)
+                print(f"DEBUG: Received multi-line input: {user}")
+                
+                if not user:  # Skip if only empty line was entered
+                    continue
+                    
+                if user.lower() in {"exit", "quit"}:
+                    break
+                    
+                chat.append({"role": "user", "content": user})
+                print("DEBUG: Calling Runner.run...")
+                res = await Runner.run(excel_assistant_agent, input=chat, context=ctx, max_turns=25)
+                print("DEBUG: Runner.run completed")
+                reply = res.final_output
+                chat.append({"role": "assistant", "content": reply})
+                print(reply)
             except (EOFError, KeyboardInterrupt):
                 print("\nExiting.")
                 break
-            if user.lower() in {"exit", "quit"}:
-                break
-            chat.append({"role": "user", "content": user})
-            print("DEBUG: Calling Runner.run...")
-            res = await Runner.run(excel_assistant_agent, input=chat, context=ctx, max_turns=25)
-            print("DEBUG: Runner.run completed")
-            reply = res.final_output
-            chat.append({"role": "assistant", "content": reply})
-            print(reply)
         print("DEBUG: Exiting interactive loop")
         return
 
