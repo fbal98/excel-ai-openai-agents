@@ -1,30 +1,28 @@
 {
   "shape": {
     "sheets": {
-      "Tadoomx QA plan": "A1:A1",
-      "Sheet2": "A1:A1",
+      "Data": "A1:F9",
       "Sheet1": "A1:A1"
     },
     "headers": {
-      "Tadoomx QA plan": [
-        "Phase",
-        "Description",
-        "Start Date",
-        "End Date",
-        "Status"
+      "Data": [
+        "Name",
+        "Age",
+        "City"
       ],
-      "Sheet2": [],
-      "Sheet1": []
+      "Sheet1": [
+        "Hello world"
+      ]
     },
     "names": {},
-    "version": 10
+    "version": 17
   },
   "agent_state": {
-    "summary": "create_sheet_tool \u2192 ok\ncreate_sheet_tool \u2192 ok\ninsert_table_tool \u2192 ok\nset_cell_value_tool \u2192 ok\nget_range_values_tool \u2192 ok\nset_rows_tool \u2192 ok\nsave_workbook_tool \u2192 ok\nget_range_values_tool \u2192 ok\nset_cell_value_tool \u2192 ok\nset_cell_value_tool \u2192 ok\nset_cell_value_tool \u2192 ok\nset_cell_value_tool \u2192 ok"
+    "summary": "set_cell_value_tool \u2192 ok\ncreate_sheet_tool \u2192 ok\ninsert_table_tool \u2192 ok\nset_range_style_tool \u2192 ok\nset_columns_widths_tool \u2192 ok\nset_columns_widths_tool \u2192 ok\nset_column_width_tool \u2192 ok\nset_column_width_tool \u2192 ok\nset_column_width_tool \u2192 ok\ninsert_table_tool \u2192 ok\nset_columns_widths_tool \u2192 ok\nset_cell_value_tool \u2192 ok\nset_cell_formula_tool \u2192 ok\nset_cell_formula_tool \u2192 ok\ninsert_table_tool \u2192 ok\nset_cell_formula_tool \u2192 ok"
   },
   "actions": [
     {
-      "tool": "create_sheet_tool",
+      "tool": "set_cell_value_tool",
       "args": {},
       "result": null,
       "ok": true
@@ -42,116 +40,51 @@
       "ok": true
     },
     {
-      "tool": "set_cell_value_tool",
+      "tool": "set_range_style_tool",
       "args": {},
       "result": null,
       "ok": true
     },
     {
-      "tool": "get_range_values_tool",
+      "tool": "set_columns_widths_tool",
       "args": {},
-      "result": [
-        [
-          null,
-          null,
-          null,
-          null,
-          null,
-          null,
-          null,
-          null,
-          null
-        ]
-      ],
+      "result": "An error occurred while running the tool. Please try again. Error: Invalid JSON input for tool set_columns_widths_tool: 1 validation error for set_columns_widths_tool_args\nwidths\n  Field required [type=missing, input_value={'sheet_name': 'Data', 'c...er': 'C', 'width': 15}]}, input_type=dict]\n    For further information visit https://errors.pydantic.dev/2.11/v/missing",
       "ok": true
     },
     {
-      "tool": "set_rows_tool",
+      "tool": "set_columns_widths_tool",
+      "args": {},
+      "result": "An error occurred while running the tool. Please try again. Error: Invalid JSON input for tool set_columns_widths_tool: 1 validation error for set_columns_widths_tool_args\nwidths\n  Field required [type=missing, input_value={'sheet_name': 'Data', 'c..., {'B': 15}, {'C': 15}]}, input_type=dict]\n    For further information visit https://errors.pydantic.dev/2.11/v/missing",
+      "ok": true
+    },
+    {
+      "tool": "set_column_width_tool",
+      "args": {},
+      "result": null,
+      "ok": true
+    },
+    {
+      "tool": "set_column_width_tool",
+      "args": {},
+      "result": null,
+      "ok": true
+    },
+    {
+      "tool": "set_column_width_tool",
+      "args": {},
+      "result": null,
+      "ok": true
+    },
+    {
+      "tool": "insert_table_tool",
       "args": {},
       "result": true,
       "ok": true
     },
     {
-      "tool": "save_workbook_tool",
+      "tool": "set_columns_widths_tool",
       "args": {},
-      "result": "Tadoomx QA plan.xlsx",
-      "ok": true
-    },
-    {
-      "tool": "get_range_values_tool",
-      "args": {},
-      "result": [
-        [
-          "Phase",
-          "Description",
-          "Start Date",
-          "End Date",
-          "Status"
-        ],
-        [
-          "requirements",
-          null,
-          null,
-          null,
-          null
-        ],
-        [
-          "Design",
-          null,
-          null,
-          null,
-          null
-        ],
-        [
-          "Impact assesment",
-          null,
-          null,
-          null,
-          null
-        ],
-        [
-          "Develpment",
-          null,
-          null,
-          null,
-          null
-        ],
-        [
-          "Testing",
-          null,
-          null,
-          null,
-          null
-        ],
-        [
-          "UAT",
-          null,
-          null,
-          null,
-          null
-        ],
-        [
-          "TAB",
-          null,
-          null,
-          null,
-          null
-        ],
-        [
-          "CAB",
-          null,
-          null,
-          null,
-          null
-        ],
-        [
-          "GO-Live",
-          null,
-          null,
-          null,
-          null
-        ]
-      ],
+      "result": "An error occurred while running the tool. Please try again. Error: Invalid JSON input for tool set_columns_widths_tool: 1 validation error for set_columns_widths_tool_args\nwidths\n  Field required [type=missing, input_value={'sheet_name': 'Data'}, input_type=dict]\n    For further information visit https://errors.pydantic.dev/2.11/v/missing",
       "ok": true
     },
     {
@@ -161,19 +94,25 @@
       "ok": true
     },
     {
-      "tool": "set_cell_value_tool",
+      "tool": "set_cell_formula_tool",
       "args": {},
       "result": null,
       "ok": true
     },
     {
-      "tool": "set_cell_value_tool",
+      "tool": "set_cell_formula_tool",
       "args": {},
       "result": null,
       "ok": true
     },
     {
-      "tool": "set_cell_value_tool",
+      "tool": "insert_table_tool",
+      "args": {},
+      "result": true,
+      "ok": true
+    },
+    {
+      "tool": "set_cell_formula_tool",
       "args": {},
       "result": null,
       "ok": true

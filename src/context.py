@@ -2,6 +2,7 @@ import logging
 from dataclasses import dataclass, field, asdict
 from typing import Optional, Dict, List, Any
 from .excel_ops import ExcelManager
+from .constants import WRITE_TOOLS # Add this import
 
 logger = logging.getLogger(__name__)
 
@@ -38,15 +39,26 @@ class AppContext:
         if len(self.actions) > self.max_actions:
             self.actions = self.actions[-self.max_actions:]
 
-    def update_shape(self) -> bool:
+    def update_shape(self, *, tool_name: Optional[str] = None) -> bool:
         """
-        Attempts to refresh the workbook shape state by calling excel_manager.quick_scan_shape.
+        Attempts to refresh the workbook shape state by calling excel_manager.quick_scan_shape,
+        unless tool_name indicates a read-only tool was used.
         Handles version incrementing, logging, and error fallback.
 
         Returns:
-            bool: True if the shape was successfully updated, False otherwise.
+            bool: True if the shape was successfully updated or skipped, False only on scan failure.
         """
-        previous_shape = self.shape
+        previous_shape = self.shape # Keep track of previous shape
+
+        # --- Add this check ---
+        if tool_name and tool_name not in WRITE_TOOLS:
+            logger.debug(f"Tool '{tool_name}' is not a write tool. Skipping shape scan, keeping previous shape (v{previous_shape.version if previous_shape else 0}).")
+            # No actual update occurred, but returning True signifies no error state.
+            # Returning False could be misinterpreted as a scan failure.
+            return True # Indicates the context state is considered valid, even if unchanged.
+        # --- End check ---
+
+        logger.debug(f"Executing shape scan (tool='{tool_name or 'Initial/Manual'}')...")
         try:
             # Delegate scanning to the ExcelManager
             new_shape = self.excel_manager.quick_scan_shape()

@@ -13,7 +13,11 @@ import asyncio
 import logging
 from typing import Any, Dict, List, Optional, TYPE_CHECKING
 
+
 import xlwings as xw
+import re
+from openpyxl.utils import get_column_letter, column_index_from_string
+from openpyxl.utils.cell import coordinate_from_string
 
 if TYPE_CHECKING:
     from .context import WorkbookShape # For type hinting
@@ -22,9 +26,9 @@ if TYPE_CHECKING:
 class ExcelManager:
     """Single realtime manager that always drives a visible Excel instance."""
 
-    # ──────────────────────────────
+    # â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
     #  Construction / housekeeping
-    # ──────────────────────────────
+    # â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
     def __init__(
         self,
         file_path: Optional[str] = None,
@@ -47,10 +51,10 @@ class ExcelManager:
             If *True*, attempt to quit all running Excel instances *before* launching
             a fresh one.  Defaults to *False* (do not disturb other sessions).
         attach_existing:
-            If *True* **and** an Excel instance is already running, re‑use the
+            If *True* **and** an Excel instance is already running, reâ€‘use the
             active instance instead of launching a new one.
         """
-        # Configuration only – real work happens in ``__aenter__``.
+        # Configuration only â€“ real work happens in ``__aenter__``.
         self._file_path = file_path
         self._visible = visible
         self._kill_others = kill_others
@@ -62,9 +66,9 @@ class ExcelManager:
 
         # Tracking for snapshot / undo helper
         self._snapshot_path: Optional[str] = None
-    # ──────────────────────────────
-    #  Async context‑manager helpers
-    # ──────────────────────────────
+    # â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+    #  Async contextâ€‘manager helpers
+    # â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
     async def __aenter__(self) -> "ExcelManager":
         """Initialise Excel resources on entering an ``async with`` block."""
         if self.app is None:
@@ -120,7 +124,7 @@ class ExcelManager:
                 self.app = None
                 self.book = None
 
-    # Optional synchronous helper for legacy call‑sites
+    # Optional synchronous helper for legacy callâ€‘sites
     def close(self) -> None:
         """Explicitly dispose Excel handles (sync)."""
         if self.book:
@@ -138,9 +142,9 @@ class ExcelManager:
 
 
 
-    # ──────────────────────────────
+    # â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
     #  Snapshot / undo helpers
-    # ──────────────────────────────
+    # â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
     def snapshot(self) -> str:
         """Save a temp copy that can be rolled back to with `revert_to_snapshot()`."""
         tmp_fd, tmp_path = tempfile.mkstemp(suffix=".xlsx")
@@ -158,13 +162,13 @@ class ExcelManager:
         # Open the snapshot
         self.book = self.app.books.open(self._snapshot_path)
 
-    # ──────────────────────────────
+    # â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
     #  Ensure changes are applied
-    # ──────────────────────────────
+    # â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
     async def ensure_changes_applied(self) -> None:
         """Asynchronously flush Excel UI and calculation pipelines.
 
-        This method yields to the event loop for ≈0.5 s, preventing the hard
+        This method yields to the event loop forÂ â‰ˆ0.5Â s, preventing the hard
         stop caused by ``time.sleep`` while Excel finishes painting.
         """
         logger = logging.getLogger(__name__)
@@ -174,7 +178,7 @@ class ExcelManager:
             self.app.screen_updating = True
             self.app.calculate()
 
-            # Re‑activate active sheet to nudge UI
+            # Reâ€‘activate active sheet to nudge UI
             active_sheet = self.book.sheets.active
             active_sheet.activate()
 
@@ -219,9 +223,9 @@ class ExcelManager:
             except Exception as e2:
                 raise RuntimeError(f"All save attempts failed: {e2}") from e2
 
-    # ──────────────────────────────
+    # â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
     #  Explicit save helpers
-    # ──────────────────────────────
+    # â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
     def save_workbook(self, file_path: str = None) -> None:
         """Save the current workbook. If no path is provided, save to a default location."""
         if not file_path:
@@ -248,9 +252,9 @@ class ExcelManager:
         except Exception as e:
             raise RuntimeError(f"Failed to save workbook to {file_path}: {e}")
 
-    # ──────────────────────────────
+    # â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
     #  New: open workbook helper
-    # ──────────────────────────────
+    # â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
     def open_workbook(self, file_path: str) -> None:
         """Close the current book without saving and open the workbook at file_path."""
         try:
@@ -267,9 +271,9 @@ class ExcelManager:
             raise RuntimeError(f"Failed to open workbook {file_path}: {e}")
         self._snapshot_path = None
 
-    # ──────────────────────────────
+    # â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
     #  Basic workbook / sheet info
-    # ──────────────────────────────
+    # â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
     def get_sheet_names(self) -> List[str]:
         return [s.name for s in self.book.sheets]
 
@@ -297,32 +301,16 @@ class ExcelManager:
             try:
                 sheet_name = sheet.name
                 # Get used range - handle potential errors if sheet is empty
-                try:
-                    # Use api for potentially more robust access, fallback to xlwings property
-                    used_range_api = sheet.api.UsedRange
-                    last_cell_addr = sheet.range((used_range_api.Row + used_range_api.Rows.Count - 1,
-                                                  used_range_api.Column + used_range_api.Columns.Count - 1)).address.replace("$","")
-
-                    # Handle truly empty sheet case where UsedRange might still return A1
-                    if last_cell_addr == 'A1' and sheet.range('A1').value is None and len(book.sheets) > 1 : # Check value only if A1 reported
-                         first_cell_val = sheet.range('A1').value
-                         if first_cell_val is None:
-                            # If A1 is the only cell and it's empty, consider the sheet effectively empty.
-                            shape.sheets[sheet_name] = "A1:A1" # Represent as single cell
-                         else:
-                            shape.sheets[sheet_name] = f"A1:{last_cell_addr}"
-                    else:
-                         shape.sheets[sheet_name] = f"A1:{last_cell_addr}"
-
-                except Exception as range_err:
-                    # Could happen on completely empty sheets or COM errors
-                    logger.warning(f"Could not determine used range for sheet '{sheet_name}': {range_err}. Defaulting to A1:A1.")
-                    shape.sheets[sheet_name] = "A1:A1" # Fallback
+                # Cross‑platform used‑range detection (works on both Windows COM and macOS)
+                used = sheet.used_range      # xlwings Range (never None)
+                last_cell = used.last_cell   # xlwings Range
+                last_addr = last_cell.address.replace("$", "")
+                shape.sheets[sheet_name] = f"A1:{last_addr}" if used.value else "A1:A1"
 
                 # Get headers (first row) - handle potential errors/empty rows
                 try:
                     # Reading row 1 can be slow on huge sheets, optimize if needed later
-                    header_values = sheet.range("1:1").value
+                    header_values = sheet.range((1, 1)).expand('right').value or []
                     if isinstance(header_values, list):
                         # Track the original length for logging
                         original_length = len(header_values)
@@ -376,15 +364,18 @@ class ExcelManager:
         shape.version = 0 # Base version, caller (AppContext) will manage incrementing
         return shape
 
+    # The second quick_scan_shape (using sheet.used_range) has been removed.
+    # The remaining one (above, using sheet.api.UsedRange) is now the active one.
+
     def get_sheet(self, sheet_name: str):
         try:
             return self.book.sheets[sheet_name]
         except (KeyError, ValueError):
             return None
 
-    # ──────────────────────────────
+    # â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
     #  Cell value helpers
-    # ──────────────────────────────
+    # â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
     def set_cell_value(self, sheet_name: str, cell_address: str, value: Any) -> None:
         sheet = self._require_sheet(sheet_name)
         sheet.range(cell_address).value = value
@@ -395,16 +386,61 @@ class ExcelManager:
 
     def set_cell_values(self, sheet_name: str, data: Dict[str, Any]) -> None:
         sheet = self._require_sheet(sheet_name)
+        num_cells = len(data)
+
+        # Optimization: Try vectorized write for rectangular ranges > 1 cell
+        if num_cells > 1:
+            try:
+                coords = []
+                min_r, min_c = float('inf'), float('inf')
+                max_r, max_c = 0, 0
+                for addr in data.keys():
+                    col_str, row_idx = coordinate_from_string(addr)
+                    col_idx = column_index_from_string(col_str)
+                    coords.append({'addr': addr, 'r': row_idx, 'c': col_idx})
+                    min_r, max_r = min(min_r, row_idx), max(max_r, row_idx)
+                    min_c, max_c = min(min_c, col_idx), max(max_c, col_idx)
+
+                is_rectangular = (num_cells == (max_r - min_r + 1) * (max_c - min_c + 1))
+
+                if is_rectangular:
+                    # Build the 2D matrix in the correct order
+                    rows_count = max_r - min_r + 1
+                    cols_count = max_c - min_c + 1
+                    matrix = [[None] * cols_count for _ in range(rows_count)]
+
+                    # Map (row, col) to value
+                    coord_map = { (item['r'], item['c']): data[item['addr']] for item in coords }
+
+                    for r_offset in range(rows_count):
+                        for c_offset in range(cols_count):
+                            current_r = min_r + r_offset
+                            current_c = min_c + c_offset
+                            matrix[r_offset][c_offset] = coord_map.get((current_r, current_c))
+
+                    start_addr = f"{get_column_letter(min_c)}{min_r}"
+                    end_addr = f"{get_column_letter(max_c)}{max_r}"
+                    range_address = f"{start_addr}:{end_addr}"
+
+                    logging.debug(f"Using vectorized write for rectangular range: {sheet_name}!{range_address}")
+                    sheet.range(range_address).value = matrix
+                    return  # Vectorized write successful
+
+            except Exception as e:
+                logging.warning(f"Failed to apply vectorized optimization for set_cell_values: {e}. Falling back to iterative write.")
+
+        # Fallback: non-rectangular or error during optimization
+        logging.debug(f"Using iterative write for {num_cells} cells in {sheet_name}")
         for addr, val in data.items():
             sheet.range(addr).value = val
 
-    # ──────────────────────────────
+    # â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
     #  Range helpers
-    # ──────────────────────────────
+    # â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
     def get_range_values(self, sheet_name: str, range_address: str) -> List[List[Any]]:
         sheet = self._require_sheet(sheet_name)
         vals = sheet.range(range_address).value
-        # xlwings returns scalar for 1×1 range; list for others
+        # xlwings returns scalar for 1Ã—1 range; list for others
         if not isinstance(vals, list):
             return [[vals]]
         # Normalise 1-D row or col to 2-D list-of-lists
@@ -412,23 +448,23 @@ class ExcelManager:
             return [vals]
         return vals
 
-    # ──────────────────────────────
+    # â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
     #  Styles (minimal viable impl)
-    # ──────────────────────────────
+    # â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
     def set_range_style(
         self, sheet_name: str, range_address: str, style: Dict[str, Any]
     ) -> None:
         """
         Currently supports:
-            • 'font': {'bold': True/False, 'color': 'FFRRGGBB'}
-            • 'fill': {'fill_type': 'solid'/'pattern'/'gradient', 'start_color': 'FFAABBCC', 'end_color': 'FFAABBCC'}
-            • 'border': {'left': {'style': 'thin'}, 'right': {'style': 'thin'}, 'top': {'style': 'thin'}, 'bottom': {'style': 'thin'}}
+            â€¢ 'font': {'bold': True/False, 'color': 'FFRRGGBB'}
+            â€¢ 'fill': {'fill_type': 'solid'/'pattern'/'gradient', 'start_color': 'FFAABBCC', 'end_color': 'FFAABBCC'}
+            â€¢ 'border': {'left': {'style': 'thin'}, 'right': {'style': 'thin'}, 'top': {'style': 'thin'}, 'bottom': {'style': 'thin'}}
         Extend as needed.
         """
         sheet = self._require_sheet(sheet_name)
         rng = sheet.range(range_address)
 
-        # Font → bold, color
+        # Font â†’ bold, color
         if "font" in style and style["font"]:
             # Handle bold
             bold = style["font"].get("bold")
@@ -462,15 +498,42 @@ class ExcelManager:
         if "border" in style and style["border"]:
             try:
                 border = style["border"]
-                # Apply borders if specified
-                if "left" in border:
-                    rng.api.Borders(7).LineStyle = 1  # xlContinuous
-                if "right" in border:
-                    rng.api.Borders(10).LineStyle = 1  # xlContinuous
-                if "top" in border:
-                    rng.api.Borders(8).LineStyle = 1  # xlContinuous
-                if "bottom" in border:
-                    rng.api.Borders(9).LineStyle = 1  # xlContinuous
+
+                # Determine whether to apply one style to every edge
+                apply_all = any(k in border for k in ("outline", "outside", "all"))
+
+                edges = {
+                    "left": 7,
+                    "right": 10,
+                    "top": 8,
+                    "bottom": 9,
+                }
+
+                # Helper to apply a style block to a particular edge
+                def _apply_edge(edge_idx: int, edge_key: str | None = None) -> None:
+                    # For outline/outside/all we re‑use the same dict; otherwise per‑edge
+                    edge_style = border if apply_all else border.get(edge_key, {})
+                    if edge_key and edge_key not in border and not apply_all:
+                        return  # edge not requested
+                    xl_edge = rng.api.Borders(edge_idx)
+                    xl_edge.LineStyle = 1  # xlContinuous
+
+                    # Weight mapping (Excel constants: 2 = thin, –4138 = medium, 4 = thick)
+                    weight_map = {"thin": 2, "medium": -4138, "thick": 4}
+                    xl_edge.Weight = weight_map.get(
+                        str(edge_style.get("style", "thin")).lower(), 2
+                    )
+
+                    # Optional colour
+                    if "color" in edge_style:
+                        try:
+                            xl_edge.Color = _hex_argb_to_bgr_int(edge_style["color"])
+                        except Exception:
+                            pass
+
+                # Apply to all four outside edges
+                for edge_name, edge_idx in edges.items():
+                    _apply_edge(edge_idx, edge_name)
             except Exception as e:
                 print(f"Border application error: {e}")
                 
@@ -481,9 +544,9 @@ class ExcelManager:
         except:
             pass
 
-    # ──────────────────────────────
+    # â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
     #  Sheet management
-    # ──────────────────────────────
+    # â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
     def create_sheet(self, sheet_name: str, index: Optional[int] = None) -> None:
         if sheet_name in self.get_sheet_names():
             raise ValueError(f"Sheet '{sheet_name}' already exists.")
@@ -494,9 +557,9 @@ class ExcelManager:
         sheet = self._require_sheet(sheet_name)
         sheet.delete()
 
-    # ──────────────────────────────
+    # â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
     #  Merge / unmerge
-    # ──────────────────────────────
+    # â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
     def merge_cells_range(self, sheet_name: str, range_address: str) -> None:
         """Merge cells in the specified range."""
         sheet = self._require_sheet(sheet_name)
@@ -523,9 +586,9 @@ class ExcelManager:
             except Exception as e2:
                 print(f"Failed to unmerge cells: {e2}")
 
-    # ──────────────────────────────
+    # â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
     #  Row / column sizing
-    # ──────────────────────────────
+    # â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
     def set_row_height(self, sheet_name: str, row_number: int, height: float) -> None:
         """Set the height of a specific row in the given sheet."""
         sheet = self._require_sheet(sheet_name)
@@ -545,9 +608,9 @@ class ExcelManager:
         rng = f"{column_letter}:{column_letter}"
         self._require_sheet(sheet_name).range(rng).column_width = width
 
-    # ──────────────────────────────
+    # â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
     #  Copy / Paste range helper
-    # ──────────────────────────────
+    # â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
     def copy_paste_range(
         self,
         src_sheet_name: str,
@@ -558,12 +621,12 @@ class ExcelManager:
     ) -> None:
         """
         Clone *src_range* from *src_sheet_name* and paste into *dst_sheet_name*
-        at *dst_anchor* in a single round‑trip.
+        at *dst_anchor* in a single roundâ€‘trip.
 
         paste_opts:
-            • "values"   → values only
-            • "formulas" → formulas only
-            • "formats"  → formats only
+            â€¢ "values"   â†’ values only
+            â€¢ "formulas" â†’ formulas only
+            â€¢ "formats"  â†’ formats only
         """
         src_sheet = self._require_sheet(src_sheet_name)
         dst_sheet = self._require_sheet(dst_sheet_name)
@@ -579,7 +642,7 @@ class ExcelManager:
         elif opts == "formulas":
             dst_rng.formula = src_rng.formula
         elif opts == "formats":
-            # xlPasteFormats = ‑4104
+            # xlPasteFormats = â€‘4104
             src_rng.api.Copy()
             dst_rng.api.PasteSpecial(Paste=-4104)
         else:
@@ -587,17 +650,17 @@ class ExcelManager:
                 f"Invalid paste_opts '{paste_opts}'. Use 'values', 'formulas', or 'formats'."
             )
 
-    # ──────────────────────────────
+    # â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
     #  (Currently stub) advanced APIs
-    # ──────────────────────────────
+    # â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
     def set_cell_formula(self, sheet_name: str, cell_address: str, formula: str) -> None:
         if not formula.startswith("="):
             formula = "=" + formula
         self.set_cell_value(sheet_name, cell_address, formula)
 
-    # ──────────────────────────────
+    # â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
     #  Style inspectors
-    # ──────────────────────────────
+    # â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
     def get_cell_style(self, sheet_name: str, cell_address: str) -> Dict[str, Any]:  # noqa: D401
         """Return a minimal style dict (bold + fill color) for a single cell."""
         sheet = self._require_sheet(sheet_name)
@@ -605,12 +668,12 @@ class ExcelManager:
 
         style: Dict[str, Any] = {}
 
-        # Font → bold
+        # Font â†’ bold
         bold = rng.api.Font.Bold
         if bold is not None:
             style["font"] = {"bold": bool(bold)}
 
-        # Fill → start_color
+        # Fill â†’ start_color
         interior_color = rng.api.Interior.Color
         if interior_color not in (None, 0):  # 0 = no fill
             style["fill"] = {"start_color": _bgr_int_to_argb_hex(interior_color)}
@@ -655,18 +718,18 @@ class ExcelManager:
             rows = values
         return {"columns": columns, "rows": rows}
 
-    # ──────────────────────────────
+    # â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
     #  Helpers
-    # ──────────────────────────────
+    # â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
     def _require_sheet(self, sheet_name: str):
         sheet = self.get_sheet(sheet_name)
         if sheet is None:
             raise KeyError(f"Sheet '{sheet_name}' not found.")
         return sheet
 
-    # ──────────────────────────────
+    # â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
     #  Table insertion
-    # ──────────────────────────────
+    # â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
     def insert_table(
         self,
         sheet_name: str,
@@ -716,20 +779,45 @@ class ExcelManager:
                 pass
 
 
-# ╭────────────────────────── Helper functions ─────────────────────────╮
+# â•­â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€ Helper functions â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â•®
+def append_table_rows(self, sheet_name: str, table_name: str, rows: List[List[Any]]) -> None:
+        """
+        Appends rows to an existing Excel table using COM ListRows.Add for incremental inserts.
+        """
+        sheet = self._require_sheet(sheet_name)
+        # Locate the table by name
+        tbl = None
+        for lo in sheet.api.ListObjects:
+            if lo.Name == table_name:
+                tbl = lo
+                break
+        if tbl is None:
+            raise KeyError(f"Table '{table_name}' not found on sheet '{sheet_name}'")
+        # Append each row to the table
+        for row_vals in rows:
+            listrow = tbl.ListRows.Add()
+            # Write values into the new row
+            row_range = listrow.Range
+            sheet.range(row_range.Address.replace('$', '')).value = row_vals
+        # Refresh calculation if needed
+        try:
+            self.app.calculate()
+        except:
+            pass
+
 def _hex_argb_to_bgr_int(argb: str) -> int:
     """
-    Convert an **8‑digit ARGB** string (``'FFRRGGBB'`` or ``'#FFRRGGBB'``) to an
+    Convert an **8â€‘digit ARGB** string (``'FFRRGGBB'`` or ``'#FFRRGGBB'``) to an
     integer in BGR byte order for the Excel COM API.
 
-    The function now *requires* the alpha channel; sending a 6‑digit RGB code
+    The function now *requires* the alpha channel; sending a 6â€‘digit RGB code
     raises ``ValueError`` so callers cannot silently lose transparency
     information.
     """
     s = argb.lstrip("#")
     if len(s) != 8:
         raise ValueError(
-            f"Color '{argb}' must be 8‑digit ARGB (e.g. 'FF3366CC' or '#FF3366CC')."
+            f"Color '{argb}' must be 8â€‘digit ARGB (e.g. 'FF3366CC' or '#FF3366CC')."
         )
 
     # Drop alpha then swap to BGR

@@ -1,4 +1,5 @@
-from agents import RunContextWrapper
+import asyncio # Added import
+from agents import RunContextWrapper, function_tool
 from .context import AppContext
 from typing import Any, Dict, Optional, List
 from openpyxl.utils import get_column_letter, column_index_from_string
@@ -50,7 +51,7 @@ class CellStyle(TypedDict, total=False):
 # All tool functions are ready for @function_tool decoration.
 
 # Tool: Open workbook
-def open_workbook_tool(ctx: RunContextWrapper[AppContext], file_path: str) -> Any:
+async def open_workbook_tool(ctx: RunContextWrapper[AppContext], file_path: str) -> Any:
     """
     Opens or attaches to an Excel workbook at the given path.
 
@@ -64,7 +65,9 @@ def open_workbook_tool(ctx: RunContextWrapper[AppContext], file_path: str) -> An
     """
     try:
         # Delegate to ExcelManager and propagate its return value (usually None).
-        return ctx.context.excel_manager.open_workbook(file_path)
+        # excel_manager.open_workbook is synchronous
+        ctx.context.excel_manager.open_workbook(file_path)
+        return True
     except Exception as e:
         print(f"[TOOL ERROR] open_workbook_tool: {e}")
         return {"error": f"Failed to open workbook '{file_path}': {e}"}
@@ -186,6 +189,7 @@ def get_range_values_tool(ctx: RunContextWrapper[AppContext], sheet_name: str, r
     except Exception as e:
         print(f"[TOOL ERROR] get_range_values_tool: {e}")
         return {"error": f"Exception getting range values for {sheet_name}!{range_address}: {e}"}
+
 # Tool: Set range style
 # The SDK automatically handles JSON conversion to the Pydantic/TypedDict model.
 def set_range_style_tool(ctx: RunContextWrapper[AppContext], sheet_name: str, range_address: str, style: CellStyle) -> Any:
@@ -250,7 +254,9 @@ def set_cell_style_tool(
         return {"error": f"Exception applying cell style to {sheet_name}!{cell_address}: {e}"}
 
 # Tool: Create sheet
-def create_sheet_tool(ctx: RunContextWrapper[AppContext], sheet_name: str, index: Optional[int] = None) -> Any:
+# Note: Using both explicit decoration and making it async to satisfy the Runner
+@function_tool
+async def create_sheet_tool(ctx: RunContextWrapper[AppContext], sheet_name: str, index: Optional[int] = None) -> Any:
     print(f"[TOOL] create_sheet_tool: sheet_name={sheet_name}, index={index}")
     """
     Creates a new sheet with the given name and optional index.
@@ -267,7 +273,10 @@ def create_sheet_tool(ctx: RunContextWrapper[AppContext], sheet_name: str, index
     # Optional: Add check for invalid characters in sheet names if needed, though openpyxl might handle this.
     # --- End Validation ---
     try:
-        return ctx.context.excel_manager.create_sheet(sheet_name, index)
+        # Run the synchronous Excel manager method in a thread to avoid blocking
+        # Use asyncio.to_thread for proper async handling of sync code
+        result = await asyncio.to_thread(ctx.context.excel_manager.create_sheet, sheet_name, index)
+        return result
     except Exception as e:
         print(f"[TOOL ERROR] create_sheet_tool: {e}")
         return {"error": f"Exception creating sheet '{sheet_name}': {e}"}
@@ -441,8 +450,7 @@ class SetCellValuesResult(TypedDict, total=False):
     error: str
 
 
-def set_cell_values_tool(
-    ctx: RunContextWrapper[AppContext],
+def set_cell_values_tool(ctx: RunContextWrapper[AppContext],
     sheet_name: str,
     data: Dict[str, Any]
 ) -> SetCellValuesResult:
@@ -774,6 +782,29 @@ def get_dataframe_tool(ctx: RunContextWrapper[AppContext], sheet_name: str, head
         return {"error": f"Exception dumping sheet '{sheet_name}': {e}"}
 
 # ------------------------------------------------------------------ #
+#  Planner helper tools                                              #
+# ------------------------------------------------------------------ #
+
+def find_row_by_value_tool(ctx: RunContextWrapper[AppContext],
+                           sheet_name: str,
+                           column_letter: str,
+                           value: Any) -> Any:
+    """
+    Return the **first 1‑based row** in *sheet_name* where the cell in *column_letter*
+    equals *value* (case‑insensitive for strings). Returns 0 if not found.
+    """
+    try:
+        col_vals = ctx.context.excel_manager.get_range_values(
+            sheet_name, f"{column_letter}:{column_letter}"
+        )
+        for idx, cell in enumerate(col_vals, start=1):
+            if str(cell[0]).strip().lower() == str(value).strip().lower():
+                return idx
+        return 0
+    except Exception as e:
+        return {"error": str(e)}
+
+# ------------------------------------------------------------------ #
 #  Style-inspection tools                                            #
 # ------------------------------------------------------------------ #
 
@@ -860,3 +891,22 @@ def save_workbook_tool(ctx: RunContextWrapper[AppContext], file_path: str) -> An
     except Exception as e:
         print(f"[TOOL ERROR] save_workbook_tool: {e}")
         return {"error": f"Exception saving workbook to '{file_path}': {e}"}
+        
+        # Tool: Append rows to existing table
+        def append_table_rows_tool(ctx: RunContextWrapper[AppContext], sheet_name: str, table_name: str, rows: List[List[Any]]) -> Any:
+            """
+            Appends one or more rows to an existing Excel table.
+            """
+            print(f"[TOOL] append_table_rows_tool: {sheet_name}, {table_name}, {len(rows)} rows")
+            if not sheet_name:
+                return {"error": "Tool 'append_table_rows_tool' failed: 'sheet_name' cannot be empty."}
+            if not table_name:
+                return {"error": "Tool 'append_table_rows_tool' failed: 'table_name' cannot be empty."}
+            if not rows:
+                return {"error": "Tool 'append_table_rows_tool' failed: 'rows' cannot be empty."}
+            try:
+                ctx.context.excel_manager.append_table_rows(sheet_name, table_name, rows)
+                return True
+            except Exception as e:
+                print(f"[TOOL ERROR] append_table_rows_tool: {e}")
+                return {"error": f"Exception appending rows to table '{table_name}' on sheet '{sheet_name}': {e}"}

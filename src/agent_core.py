@@ -8,6 +8,7 @@ from .tools import (
     set_cell_value_tool,
     get_cell_value_tool,
     get_range_values_tool,  # Tool for verifying ranges
+    find_row_by_value_tool, # Planner helper: locate row by value
     get_dataframe_tool,     # Dump entire sheet as structured data
     set_range_style_tool,
     set_cell_style_tool,
@@ -63,7 +64,6 @@ _DECORATED_TOOL_NAMES = [
     "get_dataframe_tool",
     "set_range_style_tool",
     "set_cell_style_tool",
-    "create_sheet_tool",
     "delete_sheet_tool",
     "merge_cells_range_tool",
     "unmerge_cells_range_tool",
@@ -76,6 +76,7 @@ _DECORATED_TOOL_NAMES = [
     "set_table_tool",
     "set_rows_tool",
     "set_columns_tool",
+    "find_row_by_value_tool",
     "copy_paste_range_tool",
     "set_named_ranges_tool",
     "save_workbook_tool",
@@ -270,9 +271,11 @@ formulas, and styles.
 
 <data_writing>
 • For rectangular data, **always** use `insert_table_tool` (headers + rows); *never* loop single writes row‑by‑row.
+• Use `append_table_rows_tool` when adding ≥1 new record to an existing Excel table.
 • For row‑wise dumps that start at column A, use `set_rows_tool` (give *start_row* and the 2‑D list).
 • For column‑wise dumps that start at row 1, use `set_columns_tool` (give *start_col* and the 2‑D list).
 • For disjoint named ranges, use `set_named_ranges_tool` with a `{name: value|array}` mapping.
+• Use `find_row_by_value_tool` to locate target rows before writing.
 • Whenever you need to update **two or more** cells—contiguous **or** scattered—batch them into **one** `set_cell_values_tool` call.
 • Reserve `set_cell_value_tool` strictly for truly solitary updates (≤ 1 cell in the entire turn).
 • Never iterate with repeated `set_cell_value_tool`; batch instead.
@@ -341,14 +344,18 @@ excel_assistant_agent = Agent[AppContext]( # Specify context type for clarity
         set_cell_value_tool,
         get_cell_value_tool,
         get_range_values_tool,    # Verify cell ranges
+        find_row_by_value_tool,   # Locate row by value
         get_dataframe_tool,       # Sheet dump
         set_range_style_tool,
-        create_sheet_tool,
+        set_cell_style_tool,      # Ensure single cell style tool is present
+        create_sheet_tool,        # Now correctly decorated
         delete_sheet_tool,
         merge_cells_range_tool,
         unmerge_cells_range_tool,
         set_row_height_tool,
         set_column_width_tool,
+        set_columns_widths_tool,  # Ensure bulk column width tool is present
+        set_range_formula_tool,   # Ensure range formula tool is present
         set_cell_formula_tool,
         set_cell_values_tool,     # Bulk tool
         set_table_tool,           # Bulk write table tool
@@ -366,7 +373,7 @@ excel_assistant_agent = Agent[AppContext]( # Specify context type for clarity
         revert_snapshot_tool,
     ],
     model="gpt-4.1-mini" # ALways use gpt-4.1 and never change it
-)
+  )
 
 # Example usage (for testing purposes, not part of the agent definition)
 async def main():

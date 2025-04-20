@@ -168,7 +168,7 @@ async def main() -> None:
                             # Ensure all Excel changes are applied before giving feedback to the user
                             try:
                                 print("DEBUG: Ensuring Excel changes are applied...")
-                                excel_mgr.ensure_changes_applied()
+                                await excel_mgr.ensure_changes_applied()
                                 print("DEBUG: Excel changes applied.")
                             except Exception as e:
                                 print(f"DEBUG: Error ensuring Excel changes: {e}")
