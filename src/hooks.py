@@ -79,3 +79,27 @@ class SummaryHooks(AgentHooks):
 
         # --- 4. (Optional) Log tool result for debugging ---
         # logger.debug(f"Tool '{tool.name}' result: {result}")
+
+class ActionLoggingHooks(SummaryHooks):
+    """
+    Extends SummaryHooks with a rolling action history saved in AppContext.
+    Each tool call is logged with success/failure so the agent can
+    see its recent behaviour.
+    """
+
+    async def on_tool_end(  # noqa: D401
+        self,
+        context: RunContextWrapper[AppContext],
+        agent: Agent,
+        tool: Tool,
+        result: Any,
+    ) -> None:
+        ok = not (isinstance(result, dict) and result.get("error"))
+        context.context.record_action(
+            tool=tool.name,
+            args=getattr(result, "args", {}) if isinstance(result, dict) else {},
+            result=result,
+            ok=ok,
+        )
+        # Call parent to retain summary + shape update behaviour
+        await super().on_tool_end(context, agent, tool, result)

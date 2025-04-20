@@ -19,6 +19,24 @@ class AppContext:
     # Generic bag for planner / retry metadata, agent state, etc.
     state: dict = field(default_factory=dict) # Holds 'summary', etc.
     shape: Optional[WorkbookShape] = None     # Holds the current workbook shape snapshot
+    actions: List[Dict[str, Any]] = field(default_factory=list)  # Rolling ledger of recent tool calls
+    max_actions: int = 50  # Keep only the last *N* actions
+
+    def record_action(self, *, tool: Dict[str, Any] | str, args: Dict[str, Any], result: Any, ok: bool) -> None:
+        """
+        Append a record to the action ledger and truncate to `max_actions`.
+
+        Args:
+            tool:   Tool name.
+            args:   Arguments passed to the tool.
+            result: Raw result returned from the tool.
+            ok:     True if the tool succeeded, else False.
+        """
+        self.actions.append(
+            {"tool": str(tool), "args": args, "result": result, "ok": ok}
+        )
+        if len(self.actions) > self.max_actions:
+            self.actions = self.actions[-self.max_actions:]
 
     def update_shape(self) -> bool:
         """

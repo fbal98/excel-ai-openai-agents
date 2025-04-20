@@ -35,7 +35,7 @@ from .tools import (
 )
 from typing import Optional # Added for type hinting
 from .context import AppContext
-from .hooks import SummaryHooks
+from .hooks import ActionLoggingHooks
 
 # Decorate tool functions with @function_tool and ensure detailed docstrings
 get_sheet_names_tool = function_tool(get_sheet_names_tool, strict_mode=False)
@@ -311,7 +311,7 @@ Do not attempt more than two corrective rounds in a single turn.
 excel_assistant_agent = Agent[AppContext]( # Specify context type for clarity
     name="Excel Assistant",
     instructions=_dynamic_instructions,
-    hooks=SummaryHooks(),
+    hooks=ActionLoggingHooks(),
 
     tools=[
         get_sheet_names_tool,
