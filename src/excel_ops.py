@@ -454,17 +454,10 @@ class ExcelManager:
     def set_range_style(
         self, sheet_name: str, range_address: str, style: Dict[str, Any]
     ) -> None:
-        """
-        Currently supports:
-            â€¢ 'font': {'bold': True/False, 'color': 'FFRRGGBB'}
-            â€¢ 'fill': {'fill_type': 'solid'/'pattern'/'gradient', 'start_color': 'FFAABBCC', 'end_color': 'FFAABBCC'}
-            â€¢ 'border': {'left': {'style': 'thin'}, 'right': {'style': 'thin'}, 'top': {'style': 'thin'}, 'bottom': {'style': 'thin'}}
-        Extend as needed.
-        """
         sheet = self._require_sheet(sheet_name)
         rng = sheet.range(range_address)
 
-        # Font â†’ bold, color
+        # Font → bold, color
         if "font" in style and style["font"]:
             # Handle bold
             bold = style["font"].get("bold")
@@ -493,7 +486,7 @@ class ExcelManager:
                     rng.color = color_int
                 except Exception as e:
                     print(f"Color application error: {e}")
-        
+
         # Borders
         if "border" in style and style["border"]:
             try:
@@ -509,31 +502,64 @@ class ExcelManager:
                     "bottom": 9,
                 }
 
-                # Helper to apply a style block to a particular edge
                 def _apply_edge(edge_idx: int, edge_key: str | None = None) -> None:
-                    # For outline/outside/all we re‑use the same dict; otherwise per‑edge
                     edge_style = border if apply_all else border.get(edge_key, {})
                     if edge_key and edge_key not in border and not apply_all:
-                        return  # edge not requested
+                        return
                     xl_edge = rng.api.Borders(edge_idx)
                     xl_edge.LineStyle = 1  # xlContinuous
 
-                    # Weight mapping (Excel constants: 2 = thin, –4138 = medium, 4 = thick)
                     weight_map = {"thin": 2, "medium": -4138, "thick": 4}
                     xl_edge.Weight = weight_map.get(
                         str(edge_style.get("style", "thin")).lower(), 2
                     )
 
-                    # Optional colour
                     if "color" in edge_style:
                         try:
                             xl_edge.Color = _hex_argb_to_bgr_int(edge_style["color"])
                         except Exception:
                             pass
 
-                # Apply to all four outside edges
                 for edge_name, edge_idx in edges.items():
                     _apply_edge(edge_idx, edge_name)
+            except Exception as e:
+                print(f"Border application error: {e}")
+
+        # Alignment
+        if "alignment" in style and style["alignment"]:
+            alignment = style["alignment"]
+            horiz = alignment.get("horizontal")
+            if horiz is not None:
+                alignment_map = {
+                    "left": -4131,     # xlLeft
+                    "center": -4108,   # xlCenter
+                    "right": -4152,    # xlRight
+                    "justify": -4130,
+                    "distributed": -4117,
+                }
+                rng.api.HorizontalAlignment = alignment_map.get(horiz.lower(), -4108)
+
+            vert = alignment.get("vertical")
+            if vert is not None:
+                vertical_map = {
+                    "top": -4160,      # xlTop
+                    "center": -4108,   # xlCenter
+                    "bottom": -4107,   # xlBottom
+                    "justify": -4130,
+                    "distributed": -4117,
+                }
+                rng.api.VerticalAlignment = vertical_map.get(vert.lower(), -4108)
+
+            wrap = alignment.get("wrap_text")
+            if wrap is not None:
+                rng.api.WrapText = bool(wrap)
+
+        # Force update the Excel application to show changes
+        try:
+            self.app.screen_updating = False
+            self.app.screen_updating = True
+        except:
+            pass
             except Exception as e:
                 print(f"Border application error: {e}")
                 

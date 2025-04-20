@@ -41,11 +41,18 @@ class BorderStyle(TypedDict, total=False):
     horizontal: Optional[BorderStyleDetails]
 
 
-# Define the main style structure using TypedDict
+class AlignmentStyle(TypedDict, total=False):
+    horizontal: Optional[str]
+    vertical: Optional[str]
+    wrap_text: Optional[bool]
+
+
 class CellStyle(TypedDict, total=False):
     """Defines the structure for cell styling options."""
     font: Optional[FontStyle]
     fill: Optional[FillStyle]
+    border: Optional[BorderStyle]
+    alignment: Optional[AlignmentStyle]
     border: Optional[BorderStyle]
 
 # All tool functions are ready for @function_tool decoration.
