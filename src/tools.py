@@ -109,7 +109,7 @@ def get_active_sheet_name_tool(ctx: RunContextWrapper[AppContext]) -> Any:
 # Tool: Set cell value
 def set_cell_value_tool(ctx: RunContextWrapper[AppContext], sheet_name: str, cell_address: str, value: Any) -> Any:
     """
-    Sets the value of a single cell. **Use this tool only once per turn; if two + cells need updates, call `set_cell_values_tool` instead.**
+    Sets the value of a single cell. **Use this tool only once per turn; if two + cells need updates, call `set_cell_values_tool` instead.**
 
     Args:
         ctx (RunContextWrapper[AppContext]): Agent context containing the ExcelManager.
@@ -172,7 +172,7 @@ def get_range_values_tool(ctx: RunContextWrapper[AppContext], sheet_name: str, r
         range_address (str): Excel range in A1 notation (e.g., 'A1:C5').
 
     Returns:
-        List[List[Any]]: 2‑D array of values on success.
+        List[List[Any]]: 2-D array of values on success.
         dict: {'error': str} if an error occurred.
     """
     print(f"[TOOL] get_range_values_tool: {sheet_name}!{range_address}")
@@ -448,7 +448,7 @@ def set_table_tool(ctx: RunContextWrapper[AppContext],
                    top_left: str,
                    rows: List[List[Any]]) -> Any:
     """
-    Bulk‑write a 2‑D python list into *sheet_name* starting at *top_left* (e.g. 'A2').
+    Bulk-write a 2-D python list into *sheet_name* starting at *top_left* (e.g. 'A2').
     Saves ≥30 single calls on header+data tables.
     """
     if not sheet_name or not top_left or not rows:
@@ -500,15 +500,15 @@ def insert_table_tool(
         print(f"[TOOL ERROR] insert_table_tool: {e}")
         return {"error": f"Exception in insert_table_tool: {e}"}
 
-# Tool: Bulk‑write rows starting at column A
+# Tool: Bulk-write rows starting at column A
 def set_rows_tool(ctx: RunContextWrapper[AppContext], sheet_name: str, start_row: int, rows: List[List[Any]]) -> Any:
     """
-    Writes a 2‑D Python list *rows* into *sheet_name* beginning at **column A**
+    Writes a 2-D Python list *rows* into *sheet_name* beginning at **column A**
     and **start_row**.  Each inner list is written to consecutive columns.
 
     Args:
         sheet_name (str): Worksheet name.
-        start_row   (int): First row number (1‑based).
+        start_row   (int): First row number (1-based).
         rows  (List[List[Any]]): List of rows to write.
 
     Returns:
@@ -534,10 +534,10 @@ def set_rows_tool(ctx: RunContextWrapper[AppContext], sheet_name: str, start_row
         print(f"[TOOL ERROR] set_rows_tool: {e}")
         return {"error": f"Bulk write rows in '{sheet_name}' starting at row {start_row} failed: {e}"}
 
-# Tool: Bulk‑write columns starting at row 1
+# Tool: Bulk-write columns starting at row 1
 def set_columns_tool(ctx: RunContextWrapper[AppContext], sheet_name: str, start_col: str, cols: List[List[Any]]) -> Any:
     """
-    Writes a 2‑D Python list *cols* into *sheet_name* beginning at **row 1**
+    Writes a 2-D Python list *cols* into *sheet_name* beginning at **row 1**
     and **start_col** (column letter). Each inner list becomes a column written downward.
 
     Args:
@@ -569,46 +569,7 @@ def set_columns_tool(ctx: RunContextWrapper[AppContext], sheet_name: str, start_
         print(f"[TOOL ERROR] set_columns_tool: {e}")
         return {"error": f"Bulk write columns in '{sheet_name}' starting at column {start_col} failed: {e}"}
 
-# Tool: Bulk‑write columns starting at row 1
-def set_columns_tool(ctx: RunContextWrapper[AppContext],
-                     sheet_name: str,
-                     start_col: str,
-                     cols: List[List[Any]]) -> Any:
-    """
-    Writes a 2‑D Python list *cols* into *sheet_name* beginning at **row 1**
-    and **start_col**. Each inner list becomes a column written downward.
-
-    Args:
-        sheet_name (str): Worksheet name.
-        start_col  (str): Column letter where the first column should be written.
-        cols       (List[List[Any]]): List of columns; each element is a list of
-                                      values for that column.
-
-    Returns:
-        True on success, or {'error': str} on failure.
-    """
-    if not sheet_name:
-        return {"error": "Tool 'set_columns_tool' failed: 'sheet_name' cannot be empty."}
-    if not start_col or not isinstance(start_col, str):
-        return {"error": "Tool 'set_columns_tool' failed: 'start_col' must be a column letter."}
-    if not cols:
-        return {"error": "Tool 'set_columns_tool' failed: 'cols' cannot be empty."}
-
-    try:
-        c0_idx = column_index_from_string(start_col.upper())
-        data: Dict[str, Any] = {}
-        for c_idx, col_vals in enumerate(cols):
-            col_letter = get_column_letter(c0_idx + c_idx)
-            for r_idx, val in enumerate(col_vals):
-                addr = f"{col_letter}{r_idx + 1}"
-                data[addr] = val
-        ctx.context.excel_manager.set_cell_values(sheet_name, data)
-        return True
-    except Exception as e:
-        print(f"[TOOL ERROR] set_columns_tool: {e}")
-        return {"error": f"Bulk write columns in '{sheet_name}' starting at column {start_col} failed: {e}"}
-
-# Tool: Bulk‑write disjoint named ranges
+# Tool: Bulk-write disjoint named ranges
 def set_named_ranges_tool(ctx: RunContextWrapper[AppContext],
                           sheet_name: str,
                           mapping: Dict[str, Any]) -> Any:
@@ -617,7 +578,7 @@ def set_named_ranges_tool(ctx: RunContextWrapper[AppContext],
 
     Args:
         sheet_name (str): Any existing sheet in the workbook (kept for symmetry).
-        mapping    (Dict[str, Any]): {range_name: scalar | list | 2‑D list}
+        mapping    (Dict[str, Any]): {range_name: scalar | list | 2-D list}
 
     Returns:
         True on success or {'error': str}.
@@ -638,7 +599,7 @@ def set_named_ranges_tool(ctx: RunContextWrapper[AppContext],
         print(f"[TOOL ERROR] set_named_ranges_tool: {e}")
         return {"error": f"Failed to set named ranges: {e}"}
 
-# Tool: Copy‑paste range (values | formulas | formats)
+# Tool: Copy-paste range (values | formulas | formats)
 def copy_paste_range_tool(
     ctx: RunContextWrapper[AppContext],
     src_sheet: str,
@@ -648,14 +609,14 @@ def copy_paste_range_tool(
     paste_opts: str,
 ) -> Any:
     """
-    Clone *src_range* from *src_sheet* and paste‑special into *dst_sheet*
+    Clone *src_range* from *src_sheet* and paste-special into *dst_sheet*
     beginning at *dst_anchor*.
 
     Args:
         src_sheet   (str): Source worksheet name.
         src_range   (str): Source range (A1 style).
         dst_sheet   (str): Destination worksheet name.
-        dst_anchor  (str): Top‑left destination cell (A1 style).
+        dst_anchor  (str): Top-left destination cell (A1 style).
         paste_opts  (str): 'values' | 'formulas' | 'formats'.
 
     Returns:
@@ -691,7 +652,7 @@ def set_range_formula_tool(ctx: RunContextWrapper[AppContext],
                            range_address: str,
                            template: str) -> Any:
     """
-    Apply *template* row‑wise to the leftmost cell in each row of *range_address*.
+    Apply *template* row-wise to the leftmost cell in each row of *range_address*.
     Example: template='=SUM(B{row}:E{row})' on F2:F6.
     """
     # Input validation
@@ -712,7 +673,7 @@ def set_range_formula_tool(ctx: RunContextWrapper[AppContext],
         return {"error": f"Exception applying range formula for {sheet_name}!{range_address}: {e}"}
 
 # ------------------------------------------------------------------ #
-#  Composite write‑and‑verify tool                                   #
+#  Composite write-and-verify tool                                   #
 # ------------------------------------------------------------------ #
 
 class WriteVerifyResult(TypedDict, total=False):
@@ -756,13 +717,13 @@ def write_and_verify_range_tool(
             if actual != expected:
                 diff[addr] = {"expected": expected, "actual": actual}
         except Exception as e:
-            diff[addr] = {"expected": expected, "actual": f"(read‑error: {e})"}
+            diff[addr] = {"expected": expected, "actual": f"(read-error: {e})"}
 
     if diff:
         return {"success": False, "diff": diff}
     return {"success": True}
 
-# Tool: Get full sheet as a structured “dataframe”
+# Tool: Get full sheet as a structured "dataframe"
 def get_dataframe_tool(ctx: RunContextWrapper[AppContext], sheet_name: str, header: bool = True) -> Any:
     """
     Returns the entire sheet as a structured dump:
@@ -781,7 +742,7 @@ def get_dataframe_tool(ctx: RunContextWrapper[AppContext], sheet_name: str, head
         return {"error": f"Exception dumping sheet '{sheet_name}': {e}"}
 
 # ------------------------------------------------------------------ #
-#  Style‑inspection tools                                            #
+#  Style-inspection tools                                            #
 # ------------------------------------------------------------------ #
 
 def get_cell_style_tool(

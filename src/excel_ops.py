@@ -9,9 +9,12 @@ from __future__ import annotations
 import os
 import shutil
 import tempfile
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, TYPE_CHECKING
 
 import xlwings as xw
+
+if TYPE_CHECKING:
+    from .context import WorkbookShape # For type hinting
 
 
 class ExcelManager:
@@ -20,57 +23,114 @@ class ExcelManager:
     # ──────────────────────────────
     #  Construction / housekeeping
     # ──────────────────────────────
-    def __init__(self, file_path: Optional[str] = None, visible: bool = True) -> None:
+    def __init__(
+        self,
+        file_path: Optional[str] = None,
+        visible: bool = True,
+        *,
+        kill_others: bool = False,
+        attach_existing: bool = False,
+    ) -> None:
         """
-        Launch Excel (or reuse an existing instance) and open *file_path*.
-        If *file_path* is None a new blank workbook is created.
-        """
-        # Kill any existing Excel instances to avoid conflicts
-        for app in xw.apps:
-            try:
-                app.quit()
-            except:
-                pass
+        Prepare an ExcelManager.
 
-        try:
-            # Spawn a fresh Excel instance
-            self.app = xw.App(visible=visible, add_book=False)
-            
-            # Create or open workbook
-            if file_path:
-                self.book = self.app.books.open(file_path)
+        Parameters
+        ----------
+        file_path:
+            Workbook path to open. If *None*, a new blank workbook will be created
+            when the context is entered.
+        visible:
+            Whether the Excel window should be visible.
+        kill_others:
+            If *True*, attempt to quit all running Excel instances *before* launching
+            a fresh one.  Defaults to *False* (do not disturb other sessions).
+        attach_existing:
+            If *True* **and** an Excel instance is already running, re‑use the
+            active instance instead of launching a new one.
+        """
+        # Configuration only – real work happens in ``__aenter__``.
+        self._file_path = file_path
+        self._visible = visible
+        self._kill_others = kill_others
+        self._attach_existing = attach_existing
+
+        # Handles populated later
+        self.app: Optional[xw.App] = None
+        self.book: Optional[xw.Book] = None
+
+        # Tracking for snapshot / undo helper
+        self._snapshot_path: Optional[str] = None
+    # ──────────────────────────────
+    #  Async context‑manager helpers
+    # ──────────────────────────────
+    async def __aenter__(self) -> "ExcelManager":
+        """Initialise Excel resources on entering an ``async with`` block."""
+        if self.app is None:
+            # Optionally close other Excel processes
+            if self._kill_others:
+                for _app in xw.apps:
+                    try:
+                        _app.quit()
+                    except Exception:
+                        pass
+
+            # Optionally attach to an existing process
+            if self._attach_existing and xw.apps:
+                try:
+                    self.app = xw.apps.active
+                except Exception:
+                    self.app = None
+
+            # Otherwise start a new instance
+            if self.app is None:
+                self.app = xw.App(visible=self._visible, add_book=False)
+
+            # Open or create workbook
+            if self._file_path:
+                self.book = self.app.books.open(self._file_path)
             else:
                 self.book = self.app.books.add()
 
-            # Ensure there's at least one sheet
+            # Ensure at least one sheet exists
             if not self.book.sheets:
                 self.book.sheets.add()
 
-        except Exception as e:
-            if hasattr(self, 'app'):
-                try:
-                    self.app.quit()
-                except:
-                    pass
-            raise RuntimeError(f"Failed to initialize Excel: {e}")
-            
-        self._snapshot_path: Optional[str] = None  # path to last snapshot (temp file)
+        return self
 
-    def __del__(self):
-        """Ensure Excel instance is cleaned up."""
+    async def __aexit__(self, exc_type, exc_val, exc_tb) -> None:
+        """Gracefully close workbook and Excel on context exit."""
         try:
-            if hasattr(self, 'book') and self.book:
+            if self.book:
                 try:
                     self.book.close()
-                except:
+                except Exception:
                     pass
-            if hasattr(self, 'app') and self.app:
+        finally:
+            if self.app:
                 try:
                     self.app.quit()
-                except:
+                except Exception:
                     pass
-        except:
-            pass
+                self.app = None
+                self.book = None
+
+    # Optional synchronous helper for legacy call‑sites
+    def close(self) -> None:
+        """Explicitly dispose Excel handles (sync)."""
+        if self.book:
+            try:
+                self.book.close()
+            except Exception:
+                pass
+            self.book = None
+        if self.app:
+            try:
+                self.app.quit()
+            except Exception:
+                pass
+            self.app = None
+
+
 
     # ──────────────────────────────
     #  Snapshot / undo helpers
@@ -209,6 +269,106 @@ class ExcelManager:
 
     def get_active_sheet_name(self) -> str:
         return self.book.sheets.active.name
+
+    def quick_scan_shape(self) -> "WorkbookShape":
+        """
+        Scans the current workbook state via xlwings and returns a WorkbookShape object.
+        Raises exceptions if critical operations fail (e.g., accessing book).
+        Logs warnings for non-critical issues (e.g., cannot read headers).
+        """
+        from .context import WorkbookShape # Avoid circular import at top level
+        import logging
+        logger = logging.getLogger(__name__)
+
+        if not self.book:
+            raise RuntimeError("Cannot scan shape: No active workbook found in ExcelManager.")
+
+        shape = WorkbookShape()
+        book = self.book
+
+        # 1. Scan sheets for used range and headers
+        for sheet in book.sheets:
+            try:
+                sheet_name = sheet.name
+                # Get used range - handle potential errors if sheet is empty
+                try:
+                    # Use api for potentially more robust access, fallback to xlwings property
+                    used_range_api = sheet.api.UsedRange
+                    last_cell_addr = sheet.range((used_range_api.Row + used_range_api.Rows.Count - 1,
+                                                  used_range_api.Column + used_range_api.Columns.Count - 1)).address.replace("$","")
+
+                    # Handle truly empty sheet case where UsedRange might still return A1
+                    if last_cell_addr == 'A1' and sheet.range('A1').value is None and len(book.sheets) > 1 : # Check value only if A1 reported
+                         first_cell_val = sheet.range('A1').value
+                         if first_cell_val is None:
+                            # If A1 is the only cell and it's empty, consider the sheet effectively empty.
+                            shape.sheets[sheet_name] = "A1:A1" # Represent as single cell
+                         else:
+                            shape.sheets[sheet_name] = f"A1:{last_cell_addr}"
+                    else:
+                         shape.sheets[sheet_name] = f"A1:{last_cell_addr}"
+
+                except Exception as range_err:
+                    # Could happen on completely empty sheets or COM errors
+                    logger.warning(f"Could not determine used range for sheet '{sheet_name}': {range_err}. Defaulting to A1:A1.")
+                    shape.sheets[sheet_name] = "A1:A1" # Fallback
+
+                # Get headers (first row) - handle potential errors/empty rows
+                try:
+                    # Reading row 1 can be slow on huge sheets, optimize if needed later
+                    header_values = sheet.range("1:1").value
+                    if isinstance(header_values, list):
+                        # Track the original length for logging
+                        original_length = len(header_values)
+                        # Remove trailing empty columns to reduce token usage
+                        while header_values and (header_values[-1] is None or header_values[-1] == ""):
+                            header_values.pop()
+                        # Ensure all headers are strings, handle None
+                        shape.headers[sheet_name] = [str(c) if c is not None else "" for c in header_values]
+                        
+                        # Log information about trimmed columns
+                        retained = len(header_values)
+                        trimmed = original_length - retained
+                        logger.debug(f"Sheet '{sheet_name}': Headers trimmed from {original_length} to {retained} columns (removed {trimmed} empty trailing columns)")
+                    elif header_values is not None: # Handle single-column sheet case
+                        shape.headers[sheet_name] = [str(header_values)]
+                    else: # Empty first row
+                        shape.headers[sheet_name] = []
+                except Exception as header_err:
+                    logger.warning(f"Could not read headers for sheet '{sheet_name}': {header_err}. Defaulting to empty list.")
+                    shape.headers[sheet_name] = [] # Fallback to empty list
+
+            except Exception as sheet_err:
+                logger.error(f"Error processing sheet '{getattr(sheet, 'name', 'unknown')}': {sheet_err}. Skipping sheet in shape.")
+                continue # Skip this sheet on error
+
+        # 2. Scan named ranges
+        try:
+            for name_obj in book.names:
+                nm = name_obj.name
+                try:
+                    # Check if refers_to_range exists and retrieve address
+                    refers_to = name_obj.refers_to
+                    if refers_to.startswith("="): # It's likely a formula or constant
+                         # Try to get refers_to_range, might fail if complex/external
+                         addr = name_obj.refers_to_range.address.replace("$", "")
+                         shape.names[nm] = addr
+                    else: # Should be a direct range reference
+                         addr = name_obj.refers_to_range.address.replace("$", "")
+                         shape.names[nm] = addr
+
+                except Exception as name_ref_err:
+                    # Sometimes refers_to might be a constant or complex formula, not a range
+                    logger.warning(f"Could not resolve address for named range '{nm}' (refers_to='{name_obj.refers_to}'): {name_ref_err}. Storing refers_to string.")
+                    # Store the raw refers_to string if address fails
+                    shape.names[nm] = name_obj.refers_to
+
+        except Exception as names_err:
+            logger.error(f"Error accessing named ranges: {names_err}. Skipping named ranges in shape.")
+            # Continue without names if there's a general error
+
+        shape.version = 0 # Base version, caller (AppContext) will manage incrementing
+        return shape
 
     def get_sheet(self, sheet_name: str):
         try:

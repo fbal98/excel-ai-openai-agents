@@ -33,6 +33,7 @@ from .tools import (
     CellValueMap,  # Import type for clarity if needed later
     CellStyle,     # Import type for clarity if needed later
 )
+from typing import Optional # Added for type hinting
 from .context import AppContext
 from .hooks import SummaryHooks
 
@@ -68,17 +69,133 @@ get_cell_style_tool = function_tool(get_cell_style_tool, strict_mode=False)
 get_range_style_tool = function_tool(get_range_style_tool, strict_mode=False)
 insert_table_tool = function_tool(insert_table_tool, strict_mode=False)
 
+# --- Configuration ---
+MAX_SHEETS_IN_PROMPT = 30
+MAX_HEADERS_PER_SHEET = 50  # Limit number of headers per sheet in the prompt
+
+def _compact_headers(headers):
+    """
+    Compacts header representations to reduce token usage.
+    Converts repetitive empty headers to a more compact form.
+    
+    Examples:
+    - ["Name", "", "", "", "Date"] -> ["Name", "...", "Date"]
+    - ["", "", "", ""] -> [] (all empty case)
+    - ["Name", "Age", "Email"] -> ["Name", "Age", "Email"] (no change needed)
+    """
+    if not headers:
+        return []
+    
+    # If we already have few headers or none are empty, return as is
+    empty_count = sum(1 for h in headers if not h)
+    if len(headers) <= 10 or empty_count == 0:
+        return headers
+    
+    # If all headers are empty, return an empty list
+    if empty_count == len(headers):
+        return []
+    
+    # Compact format: find meaningful headers and compress empty spans
+    result = []
+    empty_streak = 0
+    
+    for i, header in enumerate(headers):
+        if not header:  # Empty header
+            empty_streak += 1
+            # Only add ellipsis if we've seen 3+ consecutive empty headers
+            # and haven't already added an ellipsis
+            if empty_streak == 3 and (not result or result[-1] != "..."):
+                result.append("...")
+        else:  # Non-empty header
+            empty_streak = 0
+            result.append(header)
+    
+    # Remove trailing ellipsis if present
+    if result and result[-1] == "...":
+        result.pop()
+        
+    return result
+
+def _format_workbook_shape(shape: Optional[AppContext.shape.__class__]) -> str: # Use __class__ for type hint robustness
+    """Formats the WorkbookShape into a string for the prompt, respecting limits."""
+    import logging
+    logger = logging.getLogger(__name__)
+    
+    if not shape:
+        return "<workbook_shape v=0></workbook_shape>" # Empty shape if not available
+
+    # Limit sheets included in the prompt
+    limited_sheets = list(shape.sheets.items())[:MAX_SHEETS_IN_PROMPT]
+    limited_headers = {s: h for s, h in shape.headers.items() if s in dict(limited_sheets)}
+    # Named ranges are usually fewer, include all for now
+    named_ranges = shape.names.items()
+
+    sheets_str = '; '.join(f'{s}:{rng}' for s, rng in limited_sheets) if limited_sheets else ""
+    
+    # Process headers - compact them and limit per sheet
+    processed_headers = {}
+    total_original_headers = 0
+    total_compacted_headers = 0
+    
+    for sheet_name, headers in limited_headers.items():
+        total_original_headers += len(headers)
+        
+        # First compact the headers to reduce empty spans
+        compacted = _compact_headers(headers)
+        
+        # Then limit to maximum number of headers if still large
+        if len(compacted) > MAX_HEADERS_PER_SHEET:
+            # Keep first and last few headers with an ellipsis in between
+            front_headers = compacted[:MAX_HEADERS_PER_SHEET // 2]
+            back_headers = compacted[-MAX_HEADERS_PER_SHEET // 2:]
+            compacted = front_headers + ["..."] + back_headers
+            logger.debug(f"Sheet '{sheet_name}': Headers truncated from {len(compacted)} to {len(front_headers) + 1 + len(back_headers)} due to MAX_HEADERS_PER_SHEET limit")
+        
+        processed_headers[sheet_name] = compacted
+        total_compacted_headers += len(compacted)
+        
+        # Log individual sheet stats
+        if len(headers) > 10:  # Only log if there's significant compaction
+            logger.debug(f"Sheet '{sheet_name}': Headers compacted from {len(headers)} to {len(compacted)} items")
+    
+    # Log overall stats
+    if total_original_headers > 0:
+        reduction_percent = ((total_original_headers - total_compacted_headers) / total_original_headers) * 100
+        logger.info(f"Workbook shape optimization: Reduced headers from {total_original_headers} to {total_compacted_headers} items ({reduction_percent:.1f}% reduction)")
+    
+    # Only include headers for sheets present in the limited list
+    headers_str = '; '.join(f'{s}:{",".join(h)}' for s, h in processed_headers.items() if h) if processed_headers else ""
+    
+    # Include named ranges
+    names_str = '; '.join(f'name:{n}={ref}' for n, ref in named_ranges) if named_ranges else ""
+
+    # Assemble the final string, filtering empty sections
+    shape_content_parts = [part for part in [sheets_str, headers_str, names_str] if part]
+    shape_content = '\n'.join(shape_content_parts)
+    
+    final_shape = f"<workbook_shape v={shape.version}>\n{shape_content}\n</workbook_shape>"
+    logger.debug(f"Final workbook shape size: {len(final_shape)} characters")
+    
+    return final_shape
+
 
 def _dynamic_instructions(wrapper: RunContextWrapper[AppContext], agent: Agent) -> str:  # noqa: D401
     """
-    Combine the static SYSTEM_PROMPT with any running summary lines stored in
-    ``ctx.state["summary"]`` so the LLM always sees a concise recap without
-    replaying the full token history.
+    Combine the static SYSTEM_PROMPT with:
+    1. A snapshot of the current workbook shape (`<workbook_shape>`).
+    2. Any running summary lines stored in ``ctx.state["summary"]``.
     """
-    summary = wrapper.context.state.get("summary")
+    app_ctx = wrapper.context
+    # Fetch shape directly from AppContext field
+    shape_str = _format_workbook_shape(app_ctx.shape)
+    summary = app_ctx.state.get("summary") # Summary still comes from state dict
+
+    prompt_parts = [SYSTEM_PROMPT, shape_str] # Place shape after main prompt
     if summary:
-        return f"{SYSTEM_PROMPT}\n\n<progress_summary>\n{summary}\n</progress_summary>"
-    return SYSTEM_PROMPT
+        prompt_parts.append(f"<progress_summary>\n{summary}\n</progress_summary>")
+
+    return "\n\n".join(prompt_parts)
+
 
 SYSTEM_PROMPT="""
 You are a powerful **agentic Spreadsheet AI**, running inside the OpenAI Agents SDK.  
@@ -133,7 +250,6 @@ formulas, and styles.
 • For row‑wise dumps that start at column A, use `set_rows_tool` (give *start_row* and the 2‑D list).
 • For column‑wise dumps that start at row 1, use `set_columns_tool` (give *start_col* and the 2‑D list).
 • For disjoint named ranges, use `set_named_ranges_tool` with a `{name: value|array}` mapping.
-• Whenever you need to update **two or more** cells—contiguous **or** scattered—batch them into **one** `set_cell_values_tool` call.
 • Whenever you need to update **two or more** cells—contiguous **or** scattered—batch them into **one** `set_cell_values_tool` call.
 • Reserve `set_cell_value_tool` strictly for truly solitary updates (≤ 1 cell in the entire turn).
 • Never iterate with repeated `set_cell_value_tool`; batch instead.
