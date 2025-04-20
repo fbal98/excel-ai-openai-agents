@@ -10,6 +10,7 @@ import re
 import sys
 import time
 from typing import Any, Optional
+import uuid
 
 from dotenv import load_dotenv
 from agents import Runner, ItemHelpers, trace
@@ -89,71 +90,31 @@ async def handle_streaming(result, verbose: bool):
 
 
 # ──────────────────────────────
-#  Rate‑limit helpers
-# ──────────────────────────────
-def extract_retry_time(error: Exception) -> float:
-    """
-    Determine how long to wait before retrying after a rate‑limit error.
-
-    • Prefer the OpenAI‑supplied ``error.retry_after`` (seconds).
-    • Fallback: parse legacy "try again in Xs" strings.
-    • Last resort: return a 10‑second default.
-    """
-    retry_after = getattr(error, "retry_after", None)
-    if retry_after:
-        try:
-            return float(retry_after)
-        except (TypeError, ValueError):
-            pass
-
-    match = re.search(r"try again in (\d+(?:\.\d+)?)s", str(error), flags=re.IGNORECASE)
-    if match:
-        return float(match.group(1))
-
-    return 10.0  # Default back‑off
-
-
-async def handle_rate_limit(func, *args, **kwargs):
-    """
-    Execute *func* with automatic one‑shot retry on HTTP‑429 responses.
-    """
-    logger = logging.getLogger(__name__)
-
-    try:
-        return await func(*args, **kwargs)
-    except Exception as e:
-        # Look for OpenAI style rate‑limit indicators
-        if any(token in str(e).lower() for token in {"rate_limit_exceeded", "429"}):
-            wait_time = extract_retry_time(e)
-            logger.warning("⏱️  Rate limit exceeded. Sleeping %.1fs then retrying…", wait_time)
-            await asyncio.sleep(wait_time)
-            try:
-                return await func(*args, **kwargs)
-            except Exception as e2:
-                logger.error("❌ Second attempt failed after back‑off: %s", e2)
-                raise
-        raise
-
-
-# ──────────────────────────────
 #  Main entry
 # ──────────────────────────────
 async def main() -> None:
+    print("DEBUG: Starting main()")
     load_dotenv()
+    print("DEBUG: load_dotenv() called")
     if not os.getenv("OPENAI_API_KEY"):
+        print("DEBUG: OPENAI_API_KEY not found, raising error")
         raise RuntimeError("OPENAI_API_KEY not set.")
+    print("DEBUG: OPENAI_API_KEY found")
 
     args = parse_args()
-    logging.basicConfig(
-        level=logging.DEBUG if args.verbose else logging.INFO,
-        format="%(message)s",
-    )
+    print(f"DEBUG: Args parsed: {args}")
+    logging.basicConfig(level=logging.DEBUG if args.verbose else logging.INFO, format="%(message)s")
     logger = logging.getLogger(__name__)
+    print("DEBUG: Logging configured")
 
     # Use async context manager for ExcelManager to ensure proper resource management
     try:
+        print("DEBUG: Initializing ExcelManager...")
+        # Make manager visible by default, allow attaching
         async with ExcelManager(file_path=args.input_file, visible=True, attach_existing=True) as excel_mgr:
+            print("DEBUG: ExcelManager initialized")
             ctx = AppContext(excel_manager=excel_mgr)
+            print("DEBUG: AppContext initialized")
 
             # Initial workbook‑shape scan
             if ctx.update_shape():
@@ -167,112 +128,101 @@ async def main() -> None:
                 logger.info("🆕 Started new workbook.")
 
             # ────────── Interactive mode ──────────
+            print(f"DEBUG: Checking interactive mode (args.interactive={args.interactive})")
             if args.interactive:
+                print("DEBUG: Entering interactive mode block")
                 chat: list[dict[str, str]] = []
                 print("Hello! How can I help you today?")
-                print("(Enter multi‑line messages; finish with an empty line.)")
-
+                print("(Enter your message, use multiple lines if needed. Submit with an empty line)")
                 while True:
                     try:
-                        # Collect multi‑line input
-                        lines: list[str] = []
+                        print("DEBUG: Waiting for multi-line input...")
+                        lines = []
                         while True:
-                            line = input("> " if not lines else "... ")
+                            line = input("> " if not lines else "... ")  # Different prompt for continuation lines
                             if not line:
                                 break
                             lines.append(line)
-                        user_msg = "\n".join(lines)
-
-                        if not user_msg:
+                        user = "\n".join(lines)
+                        print(f"DEBUG: Received multi-line input: {user}")
+                        
+                        if not user:  # Skip if only empty line was entered
                             continue
-                        if user_msg.lower() in {"exit", "quit"}:
+                            
+                        if user.lower() in {"exit", "quit"}:
                             break
-
-                        chat.append({"role": "user", "content": user_msg})
-
-                        if args.trace_off:
-                            res = await handle_rate_limit(
-                                Runner.run,
+                            
+                        chat.append({"role": "user", "content": user})
+                        print("DEBUG: Calling Runner.run...")
+                        try:
+                            # Always call directly, bypassing the trace context manager
+                            res = await Runner.run(
                                 excel_assistant_agent,
                                 input=chat,
                                 context=ctx,
                                 max_turns=25,
+                                # trace_id=str(uuid.uuid4()) # Trace ID not needed if not tracing
                             )
-                        else:
-                            async with trace("Excel Assistant Run"):
-                                res = await handle_rate_limit(
-                                    Runner.run,
-                                    excel_assistant_agent,
-                                    input=chat,
-                                    context=ctx,
-                                    max_turns=25,
-                                )
-
-                        # Ensure Excel has applied changes before replying
-                        await excel_mgr.ensure_changes_applied()
-
-                        reply = res.final_output
-                        chat.append({"role": "assistant", "content": reply})
-                        # Keep last 4 user‑assistant pairs
-                        if len(chat) > 8:
-                            chat = chat[-8:]
-                        print(reply)
+                            print("DEBUG: Runner.run completed")
+                            
+                            # Ensure all Excel changes are applied before giving feedback to the user
+                            try:
+                                print("DEBUG: Ensuring Excel changes are applied...")
+                                excel_mgr.ensure_changes_applied()
+                                print("DEBUG: Excel changes applied.")
+                            except Exception as e:
+                                print(f"DEBUG: Error ensuring Excel changes: {e}")
+                            
+                            reply = res.final_output
+                            chat.append({"role": "assistant", "content": reply})
+                            # ---- Buffer‑window memory: keep last 4 user‑assistant pairs ----
+                            if len(chat) > 8:
+                                chat = chat[-8:]
+                            print(reply)
+                        except Exception as e:
+                            # Basic error reporting for interactive mode
+                            error_msg = f"Error processing your request: {e}"
+                            print(error_msg)
+                            # Add a placeholder response in chat history
+                            chat.append({"role": "assistant", "content": f"Sorry, I encountered an error: {e}"})
+                            if len(chat) > 8:
+                                chat = chat[-8:]
                     except (EOFError, KeyboardInterrupt):
                         print("\nExiting.")
                         break
-                return  # End interactive mode
+                print("DEBUG: Exiting interactive loop")
+                return
 
             # ────────── One‑shot / scripted mode ──────────
-            logger.info("💡 Instruction: %s", args.instruction)
+            print("DEBUG: Entering one-shot mode block")
+            logger.info(f"\n💡 Instruction: {args.instruction}")
             start = time.monotonic()
-
             try:
                 if args.stream:
-                    if args.trace_off:
-                        streamed = await handle_rate_limit(
-                            Runner.run_streamed,
-                            excel_assistant_agent,
-                            input=args.instruction,
-                            context=ctx,
-                            max_turns=25,
-                        )
-                    else:
-                        async with trace("Excel Assistant Run"):
-                            streamed = await handle_rate_limit(
-                                Runner.run_streamed,
-                                excel_assistant_agent,
-                                input=args.instruction,
-                                context=ctx,
-                                max_turns=25,
-                            )
+                    # Always call directly, bypassing the trace context manager
+                    streamed = await Runner.run_streamed(
+                        excel_assistant_agent,
+                        input=args.instruction,
+                        context=ctx,
+                        max_turns=25,
+                        # trace_id=str(uuid.uuid4()) # Trace ID not needed if not tracing
+                    )
                     result = await handle_streaming(streamed, args.verbose)
                 else:
-                    if args.trace_off:
-                        result = await handle_rate_limit(
-                            Runner.run,
-                            excel_assistant_agent,
-                            input=args.instruction,
-                            context=ctx,
-                            max_turns=25,
-                        )
-                    else:
-                        async with trace("Excel Assistant Run"):
-                            result = await handle_rate_limit(
-                                Runner.run,
-                                excel_assistant_agent,
-                                input=args.instruction,
-                                context=ctx,
-                                max_turns=25,
-                            )
+                    # Always call directly, bypassing the trace context manager
+                    result = await Runner.run(
+                        excel_assistant_agent,
+                        input=args.instruction,
+                        context=ctx,
+                        max_turns=25,
+                        # trace_id=str(uuid.uuid4()) # Trace ID not needed if not tracing
+                    )
             except Exception as e:
-                if any(tok in str(e).lower() for tok in {"rate_limit_exceeded", "429"}):
-                    logger.error("❌ Rate‑limit error after retry: %s", e)
-                    sys.exit(1)
-                logger.error("❌ Agent error: %s", e)
+                # Basic error reporting for one-shot mode
+                logger.error(f"❌ Agent error: {e}")
                 sys.exit(1)
-
             elapsed = time.monotonic() - start
-            logger.info("✅ Done in %.1fs\n\n📤 %s\n", elapsed, result.final_output)
+            logger.info(f"✅ Done in {elapsed:.1f}s\n\n📤 {result.final_output}\n")
 
             # ────────── Optional explicit save ──────────
             if args.output_file:

@@ -143,7 +143,7 @@ def _format_workbook_shape(shape: Optional[AppContext.shape.__class__]) -> str: 
     logger = logging.getLogger(__name__)
     
     if not shape:
-        # Treat the first, shape‑less scan as version 1 so later math never sees v=0.
+        # Treat the first, shape‑less scan as version 1 so later math never sees v=0.
         return "<workbook_shape v=1></workbook_shape>"
 
     # Limit sheets included in the prompt
@@ -365,7 +365,7 @@ excel_assistant_agent = Agent[AppContext]( # Specify context type for clarity
         snapshot_tool,
         revert_snapshot_tool,
     ],
-    model="gpt-4.1" # ALways use gpt-4.1 and never change it
+    model="gpt-4.1-mini" # ALways use gpt-4.1 and never change it
 )
 
 # Example usage (for testing purposes, not part of the agent definition)
