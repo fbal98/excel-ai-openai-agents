@@ -217,6 +217,38 @@ def set_range_style_tool(ctx: RunContextWrapper[AppContext], sheet_name: str, ra
         print(f"[TOOL ERROR] set_range_style_tool: {e}")
         return {"error": f"Exception applying cell style to {sheet_name}!{range_address}: {e}"}
 
+def set_cell_style_tool(
+    ctx: RunContextWrapper[AppContext],
+    sheet_name: str,
+    cell_address: str,
+    style: CellStyle,
+) -> Any:
+    """
+    Applies formatting to **one** cell.
+
+    Args:
+        sheet_name: Worksheet name.
+        cell_address: Cell address (e.g. "B4").
+        style: Same structure as CellStyle.
+
+    Returns
+    -------
+    bool on success, or ``{"error": "..."}`` on failure.
+    """
+    # Basic validation
+    if not sheet_name:
+        return {"error": "Tool 'set_cell_style_tool' failed: 'sheet_name' cannot be empty."}
+    if not cell_address:
+        return {"error": "Tool 'set_cell_style_tool' failed: 'cell_address' cannot be empty."}
+    if not style:
+        return {"error": "Tool 'set_cell_style_tool' failed: 'style' dictionary cannot be empty."}
+    try:
+        # Re‑use the existing range‑style helper for a single‑cell address
+        return ctx.context.excel_manager.set_range_style(sheet_name, cell_address, style)
+    except Exception as e:
+        print(f"[TOOL ERROR] set_cell_style_tool: {e}")
+        return {"error": f"Exception applying cell style to {sheet_name}!{cell_address}: {e}"}
+
 # Tool: Create sheet
 def create_sheet_tool(ctx: RunContextWrapper[AppContext], sheet_name: str, index: Optional[int] = None) -> Any:
     print(f"[TOOL] create_sheet_tool: sheet_name={sheet_name}, index={index}")
@@ -823,8 +855,8 @@ def save_workbook_tool(ctx: RunContextWrapper[AppContext], file_path: str) -> An
         return {"error": "Tool 'save_workbook_tool' failed: 'file_path' cannot be empty."}
     # --- End Validation ---
     try:
-        ctx.context.excel_manager.save_workbook(file_path)
-        return True
+        saved_path = ctx.context.excel_manager.save_workbook(file_path)
+        return saved_path  # Always return the absolute path
     except Exception as e:
         print(f"[TOOL ERROR] save_workbook_tool: {e}")
         return {"error": f"Exception saving workbook to '{file_path}': {e}"}

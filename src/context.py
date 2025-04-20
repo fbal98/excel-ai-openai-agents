@@ -78,7 +78,8 @@ class AppContext:
         try:
             full_state = {
                 "shape": asdict(self.shape) if self.shape else None,
-                "agent_state": self.state, # Contains "summary", etc.
+                "agent_state": self.state,  # Contains "summary", etc.
+                "actions": self.actions,    # Rolling action ledger
             }
             with open(file_path, "w", encoding="utf-8") as f:
                 json.dump(full_state, f, indent=2)

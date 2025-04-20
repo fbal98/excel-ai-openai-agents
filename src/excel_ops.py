@@ -9,6 +9,8 @@ from __future__ import annotations
 import os
 import shutil
 import tempfile
+import asyncio
+import logging
 from typing import Any, Dict, List, Optional, TYPE_CHECKING
 
 import xlwings as xw
@@ -98,7 +100,7 @@ class ExcelManager:
         return self
 
     async def __aexit__(self, exc_type, exc_val, exc_tb) -> None:
-        """Gracefully close workbook and Excel on context exit."""
+        """Gracefully close workbook and guarantee the Excel process dies."""
         try:
             if self.book:
                 try:
@@ -108,7 +110,11 @@ class ExcelManager:
         finally:
             if self.app:
                 try:
-                    self.app.quit()
+                    # Use kill when available to prevent zombie COM hosts
+                    if hasattr(self.app, "kill"):
+                        self.app.kill()
+                    else:
+                        self.app.quit()
                 except Exception:
                     pass
                 self.app = None
@@ -155,63 +161,63 @@ class ExcelManager:
     # ──────────────────────────────
     #  Ensure changes are applied
     # ──────────────────────────────
-    def ensure_changes_applied(self) -> None:
-        """Force Excel to update and apply any pending changes."""
+    async def ensure_changes_applied(self) -> None:
+        """Asynchronously flush Excel UI and calculation pipelines.
+
+        This method yields to the event loop for ≈0.5 s, preventing the hard
+        stop caused by ``time.sleep`` while Excel finishes painting.
+        """
+        logger = logging.getLogger(__name__)
         try:
-            # Toggle screen updating to force a refresh
+            # Force a visual and calculation refresh
             self.app.screen_updating = False
             self.app.screen_updating = True
-            
-            # Force calculation update
             self.app.calculate()
-            
-            # Activate the active sheet again to force focus
+
+            # Re‑activate active sheet to nudge UI
             active_sheet = self.book.sheets.active
             active_sheet.activate()
-            
-            # Small delay to allow Excel to process updates
-            import time
-            time.sleep(0.5)
-            
-            print("Excel display refreshed.")
+
+            # Give Excel a brief moment without blocking the loop
+            await asyncio.sleep(0.5)
+            logger.debug("Excel display refreshed.")
         except Exception as e:
-            print(f"Warning: Could not refresh Excel display: {e}")
+            logger.debug(f"Could not refresh Excel display: {e}")
             
-    def save_with_confirmation(self, file_path: str = None) -> None:
-        """Save the workbook with proper error handling and confirmation."""
-        # First ensure all changes are applied
-        self.ensure_changes_applied()
-        
+    async def save_with_confirmation(self, file_path: str | None = None) -> str:
+        """Save the workbook and **return the full path**.
+
+        This helper is now *async* so it can await
+        :pyfunc:`ensure_changes_applied` before persisting.
+        """
+        logger = logging.getLogger(__name__)
+
+        # Flush Excel changes first
+        await self.ensure_changes_applied()
+
         if not file_path:
-            # Generate a default filename with timestamp
-            import datetime
-            timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
-            file_path = f"workbook_{timestamp}.xlsx"
-        
-        # Ensure the path has .xlsx extension
-        if not file_path.lower().endswith('.xlsx'):
-            file_path += '.xlsx'
-            
+            from datetime import datetime
+            file_path = f"workbook_{datetime.now():%Y%m%d_%H%M%S}.xlsx"
+
+        # Guarantee the .xlsx extension
+        if not file_path.lower().endswith(".xlsx"):
+            file_path += ".xlsx"
+
         try:
-            # Save directly with Excel API to avoid xlwings issues
             self.book.save(file_path)
-            print(f"Workbook successfully saved to: {file_path}")
+            logger.debug(f"Workbook saved to: {file_path}")
             return file_path
         except Exception as e:
-            print(f"Error saving workbook: {e}")
-            
-            # Try an alternative path
+            logger.debug(f"Primary save '{file_path}' failed: {e}")
+            # Fallback to ~/Documents
             try:
-                # Try saving to the user's Documents folder
-                import os
-                documents_path = os.path.expanduser("~/Documents")
-                alt_path = os.path.join(documents_path, os.path.basename(file_path))
+                documents = os.path.expanduser("~/Documents")
+                alt_path = os.path.join(documents, os.path.basename(file_path))
                 self.book.save(alt_path)
-                print(f"Workbook saved to alternative location: {alt_path}")
+                logger.debug(f"Workbook saved to fallback location: {alt_path}")
                 return alt_path
             except Exception as e2:
-                print(f"All save attempts failed: {e2}")
-                raise RuntimeError(f"Could not save workbook: {e2}")
+                raise RuntimeError(f"All save attempts failed: {e2}") from e2
 
     # ──────────────────────────────
     #  Explicit save helpers
@@ -711,19 +717,24 @@ class ExcelManager:
 
 
 # ╭────────────────────────── Helper functions ─────────────────────────╮
-def _hex_argb_to_bgr_int(argb_or_rgb: str) -> int:
+def _hex_argb_to_bgr_int(argb: str) -> int:
     """
-    Convert 'FFAABBCC', '#AABBCC', or 'AABBCC' → integer BGR order required by Excel.
-    Alpha is discarded.
+    Convert an **8‑digit ARGB** string (``'FFRRGGBB'`` or ``'#FFRRGGBB'``) to an
+    integer in BGR byte order for the Excel COM API.
+
+    The function now *requires* the alpha channel; sending a 6‑digit RGB code
+    raises ``ValueError`` so callers cannot silently lose transparency
+    information.
     """
-    s = argb_or_rgb.lstrip("#")
-    if len(s) == 8:  # ARGB
-        s = s[2:]
-    if len(s) != 6:
-        raise ValueError(f"Invalid RGB color '{argb_or_rgb}'")
-    r, g, b = s[0:2], s[2:4], s[4:6]
-    bgr_hex = b + g + r
-    return int(bgr_hex, 16)
+    s = argb.lstrip("#")
+    if len(s) != 8:
+        raise ValueError(
+            f"Color '{argb}' must be 8‑digit ARGB (e.g. 'FF3366CC' or '#FF3366CC')."
+        )
+
+    # Drop alpha then swap to BGR
+    r, g, b = s[2:4], s[4:6], s[6:8]
+    return int(f"{b}{g}{r}", 16)
 
 
 def _bgr_int_to_argb_hex(color_int: int) -> str:

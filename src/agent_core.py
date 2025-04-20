@@ -10,6 +10,8 @@ from .tools import (
     get_range_values_tool,  # Tool for verifying ranges
     get_dataframe_tool,     # Dump entire sheet as structured data
     set_range_style_tool,
+    set_cell_style_tool,
+    set_cell_style_tool,
     create_sheet_tool,
     delete_sheet_tool,
     merge_cells_range_tool,
@@ -37,37 +39,56 @@ from typing import Optional # Added for type hinting
 from .context import AppContext
 from .hooks import ActionLoggingHooks
 
-# Decorate tool functions with @function_tool and ensure detailed docstrings
-get_sheet_names_tool = function_tool(get_sheet_names_tool, strict_mode=False)
-get_active_sheet_name_tool = function_tool(get_active_sheet_name_tool, strict_mode=False)
-set_cell_value_tool = function_tool(set_cell_value_tool, strict_mode=False)
-get_cell_value_tool = function_tool(get_cell_value_tool, strict_mode=False)
-get_range_values_tool = function_tool(get_range_values_tool, strict_mode=False)
-get_dataframe_tool = function_tool(get_dataframe_tool, strict_mode=False)
-set_range_style_tool = function_tool(set_range_style_tool, strict_mode=False)
-create_sheet_tool = function_tool(create_sheet_tool, strict_mode=False)
-delete_sheet_tool = function_tool(delete_sheet_tool, strict_mode=False)
-merge_cells_range_tool = function_tool(merge_cells_range_tool, strict_mode=False)
-unmerge_cells_range_tool = function_tool(unmerge_cells_range_tool, strict_mode=False)
-set_row_height_tool = function_tool(set_row_height_tool, strict_mode=False)
-set_column_width_tool = function_tool(set_column_width_tool, strict_mode=False)
-set_columns_widths_tool = function_tool(set_columns_widths_tool, strict_mode=False)
-set_range_formula_tool = function_tool(set_range_formula_tool, strict_mode=False)
-set_cell_formula_tool = function_tool(set_cell_formula_tool, strict_mode=False)
-set_cell_values_tool = function_tool(set_cell_values_tool, strict_mode=False)
-set_table_tool = function_tool(set_table_tool, strict_mode=False)
-set_rows_tool = function_tool(set_rows_tool, strict_mode=False)
-set_columns_tool = function_tool(set_columns_tool, strict_mode=False)
-copy_paste_range_tool = function_tool(copy_paste_range_tool, strict_mode=False)
-set_named_ranges_tool = function_tool(set_named_ranges_tool, strict_mode=False)
-save_workbook_tool = function_tool(save_workbook_tool, strict_mode=False)
-open_workbook_tool = function_tool(open_workbook_tool, strict_mode=False)
-snapshot_tool = function_tool(snapshot_tool, strict_mode=False)
-revert_snapshot_tool = function_tool(revert_snapshot_tool, strict_mode=False)
-write_and_verify_range_tool = function_tool(write_and_verify_range_tool, strict_mode=False)
-get_cell_style_tool = function_tool(get_cell_style_tool, strict_mode=False)
-get_range_style_tool = function_tool(get_range_style_tool, strict_mode=False)
-insert_table_tool = function_tool(insert_table_tool, strict_mode=False)
+# ──────────────────────────────────────────────────────────────
+#  Helper: decorate many tools in one go
+# ──────────────────────────────────────────────────────────────
+def _decorate_all(ns: dict, names: list[str]) -> None:
+    """
+    Apply ``@function_tool(strict_mode=False)`` to each function whose name
+    appears in *names* and lives in the supplied *ns* namespace.
+    """
+    for name in names:
+        try:
+            ns[name] = function_tool(ns[name], strict_mode=False)
+        except KeyError as exc:
+            raise KeyError(f"_decorate_all: '{name}' not found in namespace.") from exc
+
+
+_DECORATED_TOOL_NAMES = [
+    "get_sheet_names_tool",
+    "get_active_sheet_name_tool",
+    "set_cell_value_tool",
+    "get_cell_value_tool",
+    "get_range_values_tool",
+    "get_dataframe_tool",
+    "set_range_style_tool",
+    "set_cell_style_tool",
+    "create_sheet_tool",
+    "delete_sheet_tool",
+    "merge_cells_range_tool",
+    "unmerge_cells_range_tool",
+    "set_row_height_tool",
+    "set_column_width_tool",
+    "set_columns_widths_tool",
+    "set_range_formula_tool",
+    "set_cell_formula_tool",
+    "set_cell_values_tool",
+    "set_table_tool",
+    "set_rows_tool",
+    "set_columns_tool",
+    "copy_paste_range_tool",
+    "set_named_ranges_tool",
+    "save_workbook_tool",
+    "open_workbook_tool",
+    "snapshot_tool",
+    "revert_snapshot_tool",
+    "write_and_verify_range_tool",
+    "get_cell_style_tool",
+    "get_range_style_tool",
+    "insert_table_tool",
+]
+
+_decorate_all(globals(), _DECORATED_TOOL_NAMES)
 
 # --- Configuration ---
 MAX_SHEETS_IN_PROMPT = 30
@@ -122,7 +143,8 @@ def _format_workbook_shape(shape: Optional[AppContext.shape.__class__]) -> str: 
     logger = logging.getLogger(__name__)
     
     if not shape:
-        return "<workbook_shape v=0></workbook_shape>" # Empty shape if not available
+        # Treat the first, shape‑less scan as version 1 so later math never sees v=0.
+        return "<workbook_shape v=1></workbook_shape>"
 
     # Limit sheets included in the prompt
     limited_sheets = list(shape.sheets.items())[:MAX_SHEETS_IN_PROMPT]

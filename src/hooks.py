@@ -5,7 +5,7 @@ Agent‑level hooks for memory, progressive‑summary, and workbook shape tracki
 from __future__ import annotations
 
 import logging
-from typing import Any
+from typing import Any, Dict
 
 from agents import Agent, AgentHooks, RunContextWrapper, Tool
 
@@ -19,6 +19,7 @@ WRITE_TOOLS = {
     "open_workbook_tool",       # Opens a different book
     "set_cell_value_tool",
     "set_range_style_tool",
+    "set_cell_style_tool",
     "create_sheet_tool",
     "delete_sheet_tool",
     "merge_cells_range_tool",
@@ -87,6 +88,16 @@ class ActionLoggingHooks(SummaryHooks):
     see its recent behaviour.
     """
 
+    async def on_tool_start(  # noqa: D401
+        self,
+        context: RunContextWrapper[AppContext],
+        agent: Agent,
+        tool: Tool,
+        args: Dict[str, Any],
+    ) -> None:
+        """Cache real arguments so we can log them accurately later."""
+        context.context.state["_last_args"] = args
+
     async def on_tool_end(  # noqa: D401
         self,
         context: RunContextWrapper[AppContext],
@@ -94,12 +105,13 @@ class ActionLoggingHooks(SummaryHooks):
         tool: Tool,
         result: Any,
     ) -> None:
+        args = context.context.state.pop("_last_args", {})
         ok = not (isinstance(result, dict) and result.get("error"))
         context.context.record_action(
             tool=tool.name,
-            args=getattr(result, "args", {}) if isinstance(result, dict) else {},
+            args=args,
             result=result,
             ok=ok,
         )
-        # Call parent to retain summary + shape update behaviour
+        # Call parent to retain summary + shape‑update behaviour
         await super().on_tool_end(context, agent, tool, result)

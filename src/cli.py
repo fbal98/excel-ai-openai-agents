@@ -1,22 +1,24 @@
 """Command‑line interface for the Autonomous Excel Assistant (single realtime mode)."""
 
+from __future__ import annotations
+
 import argparse
 import asyncio
 import logging
 import os
+import re
 import sys
 import time
-import re
 from typing import Any, Optional
 
 from dotenv import load_dotenv
-from agents import Runner
+from agents import Runner, ItemHelpers, trace
 from agents.stream_events import RunItemStreamEvent
 from openai.types.responses import ResponseTextDeltaEvent
 
 from .agent_core import excel_assistant_agent
 from .context import AppContext
-from .excel_ops import ExcelManager  # unified manager
+from .excel_ops import ExcelManager
 
 
 # ──────────────────────────────
@@ -30,6 +32,7 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--interactive", "-i", action="store_true", help="Interactive chat mode.")
     p.add_argument("--stream", action="store_true", help="Stream the agent's reasoning/output.")
     p.add_argument("-v", "--verbose", action="store_true", help="Verbose logging.")
+    p.add_argument("--trace-off", action="store_true", help="Disable OpenAI tracing for this run.")
     return p.parse_args()
 
 
@@ -37,269 +40,258 @@ def parse_args() -> argparse.Namespace:
 #  Streaming helper
 # ──────────────────────────────
 async def handle_streaming(result, verbose: bool):
+    """
+    Consume a RunResultStreaming, display live progress, and
+    return an object with `.final_output`.
+    """
     logger = logging.getLogger(__name__)
-    final_output, last_tool, last_message = "", None, None
-    
+    final_output: str = ""
+    last_message: Optional[str] = None
+
     try:
         async for event in result.stream_events():
+            # Raw token‑level deltas
             if event.type == "raw_response_event" and isinstance(event.data, ResponseTextDeltaEvent):
-                final_output += event.data.delta
+                delta: str = event.data.delta
+                final_output += delta
+                if last_message is None:
+                    # Keep a rolling copy so non‑verbose runs still get the full text
+                    last_message = final_output
                 if verbose:
-                    print(event.data.delta, end="", flush=True)
-            elif event.type == "run_item_stream_event":
-                item = event  # type: RunItemStreamEvent
-                if item.item.type == "tool_call_item":
-                    fn = getattr(item.item, "function_name", getattr(item.item, "name", "tool"))
-                    last_tool = fn
-                    if verbose:
-                        logger.info(f"🛠️  {fn}")
-                elif item.item.type == "tool_call_output_item" and verbose:
-                    logger.info(f"📊 Result from {last_tool}: {item.item.output}")
-                elif item.item.type == "message_output_item":
-                    msg = getattr(item.item, "text", item.item.content)
-                    last_message = msg
-                    if verbose:
-                        logger.info(f"💬 {msg}")
+                    print(delta, end="", flush=True)
+                continue
+
+            if event.type != "run_item_stream_event":
+                continue
+
+            item = event.item  # type: RunItemStreamEvent
+            if item.type == "tool_call_item":
+                if verbose:
+                    print(f"🛠️  {item.function_name}")
+            elif item.type == "tool_call_output_item":
+                if verbose:
+                    ok = "✔" if "error" not in item.output else "✖"
+                    print(f"   ↳ {ok} {item.output}")
+            elif item.type == "message_output_item":
+                msg_text = ItemHelpers.text_message_output(item)
+                last_message = msg_text
+                if verbose:
+                    print(f"💬 {msg_text}")
     except Exception as e:
-        err_str = str(e).lower()
-        if "rate_limit_exceeded" in err_str or "429" in err_str:
-            logger.warning(f"⚠️ Rate limit exceeded during streaming: {e}")
-            # Add the error message to the output so the user knows what happened
-            rate_limit_msg = "\n\n[Streaming halted due to OpenAI rate limit. Some content may be missing.]"
-            if last_message:
-                last_message += rate_limit_msg
-            else:
-                final_output += rate_limit_msg
-        else:
-            logger.error(f"Error during streaming: {e}")
-            # Add a generic error message
-            error_msg = f"\n\n[Streaming error: {e}]"
-            if last_message:
-                last_message += error_msg
-            else:
-                final_output += error_msg
-    
-    class _Result:  # simple wrapper to mimic Runner result
-        def __init__(self, text): self.final_output = text
+        logger.error("Streaming error: %s", e)
+        final_output += f"\n\n[Streaming error: {e}]"
+
+    class _Result:
+        def __init__(self, text: str):  # noqa: D401
+            self.final_output = text
+
     return _Result(last_message or final_output)
 
 
 # ──────────────────────────────
-#  Rate limit helper
+#  Rate‑limit helpers
 # ──────────────────────────────
-def extract_retry_time(error_message: str) -> float:
-    """Extract retry time from OpenAI rate limit error message or return a default time."""
-    # Try to extract "Please try again in X.XXXs" pattern
-    pattern = r"try again in (\d+\.\d+)s"
-    match = re.search(pattern, str(error_message))
+def extract_retry_time(error: Exception) -> float:
+    """
+    Determine how long to wait before retrying after a rate‑limit error.
+
+    • Prefer the OpenAI‑supplied ``error.retry_after`` (seconds).
+    • Fallback: parse legacy "try again in Xs" strings.
+    • Last resort: return a 10‑second default.
+    """
+    retry_after = getattr(error, "retry_after", None)
+    if retry_after:
+        try:
+            return float(retry_after)
+        except (TypeError, ValueError):
+            pass
+
+    match = re.search(r"try again in (\d+(?:\.\d+)?)s", str(error), flags=re.IGNORECASE)
     if match:
         return float(match.group(1))
-    
-    # If that fails, use a default backoff time
-    return 10.0  # Default to 10 seconds
+
+    return 10.0  # Default back‑off
 
 
 async def handle_rate_limit(func, *args, **kwargs):
     """
-    Wrapper to handle rate limit errors with automatic retry.
-    If a rate limit error is encountered, wait and retry once.
-    
-    Args:
-        func: Async function to call
-        *args, **kwargs: Arguments to pass to the function
-        
-    Returns:
-        Result from successful function call
-        
-    Raises:
-        The original exception if retry also fails
+    Execute *func* with automatic one‑shot retry on HTTP‑429 responses.
     """
     logger = logging.getLogger(__name__)
-    
+
     try:
         return await func(*args, **kwargs)
     except Exception as e:
-        err_str = str(e).lower()
-        
-        # Check if it's a rate limit error (429)
-        if "rate_limit_exceeded" in err_str or "429" in err_str:
-            # Extract wait time or use default
-            wait_time = extract_retry_time(err_str)
-            logger.warning(f"⏱️ Rate limit exceeded. Waiting {wait_time:.1f}s before retry...")
-            
-            # Sleep for the specified time
+        # Look for OpenAI style rate‑limit indicators
+        if any(token in str(e).lower() for token in {"rate_limit_exceeded", "429"}):
+            wait_time = extract_retry_time(e)
+            logger.warning("⏱️  Rate limit exceeded. Sleeping %.1fs then retrying…", wait_time)
             await asyncio.sleep(wait_time)
-            
-            # Try one more time
             try:
-                logger.info("🔄 Retrying API call after rate limit backoff...")
                 return await func(*args, **kwargs)
             except Exception as e2:
-                logger.error(f"❌ Second attempt also failed after rate limit backoff: {e2}")
-                raise  # Propagate the error
-        else:
-            # Not a rate limit error, propagate immediately
-            raise
+                logger.error("❌ Second attempt failed after back‑off: %s", e2)
+                raise
+        raise
 
 
 # ──────────────────────────────
 #  Main entry
 # ──────────────────────────────
 async def main() -> None:
-    print("DEBUG: Starting main()")
     load_dotenv()
-    print("DEBUG: load_dotenv() called")
     if not os.getenv("OPENAI_API_KEY"):
-        print("DEBUG: OPENAI_API_KEY not found, raising error")
         raise RuntimeError("OPENAI_API_KEY not set.")
-    print("DEBUG: OPENAI_API_KEY found")
 
     args = parse_args()
-    print(f"DEBUG: Args parsed: {args}")
-    logging.basicConfig(level=logging.DEBUG if args.verbose else logging.INFO, format="%(message)s")
+    logging.basicConfig(
+        level=logging.DEBUG if args.verbose else logging.INFO,
+        format="%(message)s",
+    )
     logger = logging.getLogger(__name__)
-    print("DEBUG: Logging configured")
 
     # Use async context manager for ExcelManager to ensure proper resource management
     try:
-        print("DEBUG: Initializing ExcelManager...")
-        # Make manager visible by default, allow attaching
         async with ExcelManager(file_path=args.input_file, visible=True, attach_existing=True) as excel_mgr:
-            print("DEBUG: ExcelManager initialized")
             ctx = AppContext(excel_manager=excel_mgr)
-            print("DEBUG: AppContext initialized")
 
-            # --- Perform initial workbook shape scan using the AppContext helper ---
-            print("DEBUG: Performing initial workbook shape scan...")
-            initial_scan_success = ctx.update_shape() # This now handles logging internally
-            if not initial_scan_success:
-                logger.warning("Initial workbook shape scan failed. Proceeding without initial shape info (will retry on first write).")
+            # Initial workbook‑shape scan
+            if ctx.update_shape():
+                logger.debug("Initial workbook shape scanned (v%s).", ctx.shape.version)
             else:
-                # Log success (already done inside update_shape, but can add CLI specific msg if needed)
-                print(f"DEBUG: Initial shape scanned (v{ctx.shape.version if ctx.shape else 'N/A'})")
-                # Optional: Perform an initial state dump if needed
-                # ctx.dump_state_to_json("initial_state_dump.json")
-            # --- End initial scan ---
+                logger.warning("Initial workbook shape scan failed; proceeding without shape info.")
 
             if args.input_file:
-                logger.info(f"📂 Opened workbook: {args.input_file}")
+                logger.info("📂 Opened workbook: %s", args.input_file)
             else:
                 logger.info("🆕 Started new workbook.")
-            print("DEBUG: Workbook info logged")
 
             # ────────── Interactive mode ──────────
-            print(f"DEBUG: Checking interactive mode (args.interactive={args.interactive})")
             if args.interactive:
-                print("DEBUG: Entering interactive mode block")
                 chat: list[dict[str, str]] = []
                 print("Hello! How can I help you today?")
-                print("(Enter your message, use multiple lines if needed. Submit with an empty line)")
+                print("(Enter multi‑line messages; finish with an empty line.)")
+
                 while True:
                     try:
-                        print("DEBUG: Waiting for multi-line input...")
-                        lines = []
+                        # Collect multi‑line input
+                        lines: list[str] = []
                         while True:
-                            line = input("> " if not lines else "... ")  # Different prompt for continuation lines
+                            line = input("> " if not lines else "... ")
                             if not line:
                                 break
                             lines.append(line)
-                        user = "\n".join(lines)
-                        print(f"DEBUG: Received multi-line input: {user}")
-                        
-                        if not user:  # Skip if only empty line was entered
+                        user_msg = "\n".join(lines)
+
+                        if not user_msg:
                             continue
-                            
-                        if user.lower() in {"exit", "quit"}:
+                        if user_msg.lower() in {"exit", "quit"}:
                             break
-                            
-                        chat.append({"role": "user", "content": user})
-                        print("DEBUG: Calling Runner.run...")
-                        try:
-                            res = await handle_rate_limit(Runner.run, excel_assistant_agent, input=chat, context=ctx, max_turns=25)
-                            print("DEBUG: Runner.run completed")
-                            
-                            # Ensure all Excel changes are applied before giving feedback to the user
-                            try:
-                                print("DEBUG: Ensuring Excel changes are applied...")
-                                excel_mgr.ensure_changes_applied()
-                                print("DEBUG: Excel changes applied.")
-                            except Exception as e:
-                                print(f"DEBUG: Error ensuring Excel changes: {e}")
-                            
-                            reply = res.final_output
-                            chat.append({"role": "assistant", "content": reply})
-                            # ---- Buffer‑window memory: keep last 4 user‑assistant pairs ----
-                            if len(chat) > 8:
-                                chat = chat[-8:]
-                            print(reply)
-                        except Exception as e:
-                            err_str = str(e).lower()
-                            if "rate_limit_exceeded" in err_str or "429" in err_str:
-                                error_msg = "Sorry, I hit the OpenAI API rate limit and couldn't process your request even after waiting."
-                                error_msg += "\nThis can happen with large Excel files or frequent requests."
-                                error_msg += "\nPlease try again in a few minutes or consider simplifying your Excel data."
-                                print(error_msg)
-                                # Don't add error to chat history
-                            else:
-                                error_msg = f"Error processing your request: {e}"
-                                print(error_msg)
-                                # Add a placeholder response in chat history
-                                chat.append({"role": "assistant", "content": f"Sorry, I encountered an error: {e}"})
-                                if len(chat) > 8:
-                                    chat = chat[-8:]
+
+                        chat.append({"role": "user", "content": user_msg})
+
+                        if args.trace_off:
+                            res = await handle_rate_limit(
+                                Runner.run,
+                                excel_assistant_agent,
+                                input=chat,
+                                context=ctx,
+                                max_turns=25,
+                            )
+                        else:
+                            async with trace("Excel Assistant Run"):
+                                res = await handle_rate_limit(
+                                    Runner.run,
+                                    excel_assistant_agent,
+                                    input=chat,
+                                    context=ctx,
+                                    max_turns=25,
+                                )
+
+                        # Ensure Excel has applied changes before replying
+                        await excel_mgr.ensure_changes_applied()
+
+                        reply = res.final_output
+                        chat.append({"role": "assistant", "content": reply})
+                        # Keep last 4 user‑assistant pairs
+                        if len(chat) > 8:
+                            chat = chat[-8:]
+                        print(reply)
                     except (EOFError, KeyboardInterrupt):
                         print("\nExiting.")
                         break
-                print("DEBUG: Exiting interactive loop")
-                return
+                return  # End interactive mode
 
             # ────────── One‑shot / scripted mode ──────────
-            print("DEBUG: Entering one-shot mode block")
-            logger.info(f"\n💡 Instruction: {args.instruction}")
+            logger.info("💡 Instruction: %s", args.instruction)
             start = time.monotonic()
+
             try:
                 if args.stream:
-                    streamed = await handle_rate_limit(Runner.run_streamed, excel_assistant_agent, input=args.instruction, context=ctx, max_turns=25)
+                    if args.trace_off:
+                        streamed = await handle_rate_limit(
+                            Runner.run_streamed,
+                            excel_assistant_agent,
+                            input=args.instruction,
+                            context=ctx,
+                            max_turns=25,
+                        )
+                    else:
+                        async with trace("Excel Assistant Run"):
+                            streamed = await handle_rate_limit(
+                                Runner.run_streamed,
+                                excel_assistant_agent,
+                                input=args.instruction,
+                                context=ctx,
+                                max_turns=25,
+                            )
                     result = await handle_streaming(streamed, args.verbose)
                 else:
-                    result = await handle_rate_limit(Runner.run, excel_assistant_agent, input=args.instruction, context=ctx, max_turns=25)
+                    if args.trace_off:
+                        result = await handle_rate_limit(
+                            Runner.run,
+                            excel_assistant_agent,
+                            input=args.instruction,
+                            context=ctx,
+                            max_turns=25,
+                        )
+                    else:
+                        async with trace("Excel Assistant Run"):
+                            result = await handle_rate_limit(
+                                Runner.run,
+                                excel_assistant_agent,
+                                input=args.instruction,
+                                context=ctx,
+                                max_turns=25,
+                            )
             except Exception as e:
-                err_str = str(e).lower()
-                if "rate_limit_exceeded" in err_str or "429" in err_str:
-                    logger.error(f"❌ Rate limit error: {e}")
-                    logger.error("The OpenAI API rate limit was exceeded, and our retry attempt also failed.")
-                    logger.error("You may want to try again in a few minutes or with a smaller Excel file.")
-                else:
-                    logger.error(f"❌ Agent error: {e}")
+                if any(tok in str(e).lower() for tok in {"rate_limit_exceeded", "429"}):
+                    logger.error("❌ Rate‑limit error after retry: %s", e)
+                    sys.exit(1)
+                logger.error("❌ Agent error: %s", e)
                 sys.exit(1)
+
             elapsed = time.monotonic() - start
-            logger.info(f"✅ Done in {elapsed:.1f}s\n\n📤 {result.final_output}\n")
+            logger.info("✅ Done in %.1fs\n\n📤 %s\n", elapsed, result.final_output)
 
             # ────────── Optional explicit save ──────────
             if args.output_file:
                 try:
-                    # Ensure all changes are visible
-                    excel_mgr.ensure_changes_applied()
-                    
-                    # Use the more robust save method
-                    saved_path = excel_mgr.save_with_confirmation(args.output_file)
-                    logger.info(f"💾 Workbook saved to {saved_path}")
+                    await excel_mgr.ensure_changes_applied()
+                    saved_path = await excel_mgr.save_with_confirmation(args.output_file)
+                    logger.info("💾 Workbook saved to %s", saved_path)
                 except Exception as e:
-                    logger.error(f"❌ Failed to save workbook: {e}")
-                    # Try one more time with a default path
+                    logger.error("❌ Failed to save workbook: %s", e)
                     try:
-                        saved_path = excel_mgr.save_with_confirmation()
-                        logger.info(f"💾 Workbook saved to alternative location: {saved_path}")
-                    except:
+                        saved_path = await excel_mgr.save_with_confirmation()
+                        logger.info("💾 Workbook saved to fallback location: %s", saved_path)
+                    except Exception:
                         logger.error("All save attempts failed.")
-                        
     except Exception as e:
-        print(f"DEBUG: Error during execution: {e}")
-        logger.error(f"❌ Error: {e}")
+        logger.error("❌ Fatal error: %s", e)
         sys.exit(1)
 
 
-# Execute main() when run directly
 if __name__ == "__main__":
     try:
         asyncio.run(main())
