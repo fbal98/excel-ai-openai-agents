@@ -96,3 +96,14 @@
 - **Expected Outcome:**  
   New **Summary** sheet with pivot: Names as rows, “Sum of Total” values.
 
+Write “Hello world” to Sheet1!A1
+  Create a new sheet called Data
+    On “Data” put the headers Name, Age, City in A1:C1 and add three rows of dummy values
+  Bold the header row on “Data” and auto-size those three columns to fit
+
+
+
+
+  Insert a formatted Excel table on “Data” starting A6 with headers Sales, Q1, Q2, Q3, Q4 and two rows of sample numbers
+    Add a “Total” column right of that table that sums Q1:Q4 per row and then add a Total Row that sums the Total column
+  Merge cells A1:D1 on Sheet1 and center the text “Annual Report”

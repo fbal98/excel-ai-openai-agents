@@ -714,14 +714,14 @@ class ExcelManager:
                     # Default to 'thin' if no style provided
                     border_style = border.get("style", "thin")
                     weight_map = {
-                        "thin": BorderWeight.thin,
-                        "medium": BorderWeight.medium,
-                        "thick": BorderWeight.thick,
+                        "thin": 2,       # xlThin
+                        "medium": -4138, # xlMedium
+                        "thick": 4,      # xlThick
                     }
                     color_hex = border.get("color", "FF000000")  # default black
                     try:
                         rng.api.BorderAround(
-                            Weight=weight_map.get(border_style, BorderWeight.thin),
+                            Weight=weight_map.get(border_style, 2),
                             LineStyle=LineStyle.continuous,
                         )
                         rng.api.Borders.Color = _to_bgr(color_hex)

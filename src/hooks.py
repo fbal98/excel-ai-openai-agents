@@ -18,16 +18,23 @@ logger = logging.getLogger(__name__)
 # ----------------------------------------------------------
 #  Shared helper: decide if a tool result means "success”
 # ----------------------------------------------------------
+from .tools import _ensure_toolresult
+
 def _is_result_ok(res: Any) -> bool: 
     """
-    A result counts as *success* only when it is a dict and
-    ``success is True`` according to the unified ToolResult schema.
+    Treat everything as success unless it explicitly signals failure.
+
+    Success:
+        • res is a dict with {"success": True}
+        • res is a dict with no "error"
+        • res is any non‑dict value (None, str, list, int, …)
+
+    Failure:
+        • res is a dict containing a truthy "error"
+        • res is dict with {"success": False}
     """
-    # Updated check: Accept True directly as success for simpler tools
-    if res is True:
-        return True
-    # Original check for dict-based results
-    return isinstance(res, dict) and res.get("success") is True
+    res = _ensure_toolresult(res)
+    return bool(res.get("success", True))
 
 
 def append_summary_line(app_ctx: "AppContext", line: str, max_lines: int = 15) -> None:
