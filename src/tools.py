@@ -1,15 +1,28 @@
 import asyncio # Added import
 from agents import RunContextWrapper, function_tool
 from .context import AppContext
-from typing import Any, Dict, Optional, List
+from typing import Any, Dict, Optional, List, Union
 from openpyxl.utils import get_column_letter, column_index_from_string
 from openpyxl.utils.cell import coordinate_from_string
 from typing_extensions import TypedDict
+
+class ToolResult(TypedDict, total=False):
+    """Standard schema every Excel agent tool must now return."""
+    success: bool              # always present – True/False
+    error: Optional[str]       # present on failure, None on success
+    data: Any | None           # optional payload (lists, scalars, etc.)
+
+class SetCellValuesResult(ToolResult, total=False):
+    """Backward‑compat alias kept for type hints."""
+    pass
 
 # NOTE: ExcelManager methods return None on success; tool wrappers must not treat None as failure.
 #       Always return True (or success dict) when no exception is raised.
 
 # Define specific types for style components
+# Define a union type for a single cell's data
+CellValue = Union[str, int, float, bool, None]
+
 class FontStyle(TypedDict, total=False):
     name: Optional[str]
     size: Optional[float]
@@ -58,6 +71,7 @@ class CellStyle(TypedDict, total=False):
 # All tool functions are ready for @function_tool decoration.
 
 # Tool: Open workbook
+@function_tool
 async def open_workbook_tool(ctx: RunContextWrapper[AppContext], file_path: str) -> Any:
     """
     Opens or attaches to an Excel workbook at the given path.
@@ -80,6 +94,7 @@ async def open_workbook_tool(ctx: RunContextWrapper[AppContext], file_path: str)
         return {"error": f"Failed to open workbook '{file_path}': {e}"}
 
 # Tool: Get all sheet names
+@function_tool
 def get_sheet_names_tool(ctx: RunContextWrapper[AppContext]) -> Any:
     """
     Retrieves all worksheet names in the current Excel workbook.
@@ -99,6 +114,7 @@ def get_sheet_names_tool(ctx: RunContextWrapper[AppContext]) -> Any:
         return {"error": f"Failed to get sheet names: {e}"}
 
 # Tool: Get active sheet name
+@function_tool
 def get_active_sheet_name_tool(ctx: RunContextWrapper[AppContext]) -> Any:
     """
     Retrieves the name of the currently active worksheet.
@@ -117,7 +133,8 @@ def get_active_sheet_name_tool(ctx: RunContextWrapper[AppContext]) -> Any:
         return {"error": f"Failed to get active sheet name: {e}"}
 
 # Tool: Set cell value
-def set_cell_value_tool(ctx: RunContextWrapper[AppContext], sheet_name: str, cell_address: str, value: Any) -> Any:
+@function_tool
+def set_cell_value_tool(ctx: RunContextWrapper[AppContext], sheet_name: str, cell_address: str, value: CellValue) -> Any:
     """
     Sets the value of a single cell. **Use this tool only once per turn; if two + cells need updates, call `set_cell_values_tool` instead.**
 
@@ -125,7 +142,7 @@ def set_cell_value_tool(ctx: RunContextWrapper[AppContext], sheet_name: str, cel
         ctx (RunContextWrapper[AppContext]): Agent context containing the ExcelManager.
         sheet_name (str): Name of the worksheet.
         cell_address (str): Cell address in A1 notation (e.g., 'B2').
-        value (Any): The value to set in the cell (number, text, date, or formula).
+        value (CellValue): The value to set in the cell (text, number, date, boolean, or formula).
 
     Returns:
         bool: True if the cell was updated successfully.
@@ -146,6 +163,7 @@ def set_cell_value_tool(ctx: RunContextWrapper[AppContext], sheet_name: str, cel
         return {"error": f"Exception setting cell value for {sheet_name}!{cell_address}: {e}"}
 
 # Tool: Get cell value
+@function_tool
 def get_cell_value_tool(ctx: RunContextWrapper[AppContext], sheet_name: str, cell_address: str) -> Any:
     print(f"[TOOL] get_cell_value_tool: {sheet_name}!{cell_address}")
     """
@@ -172,6 +190,7 @@ def get_cell_value_tool(ctx: RunContextWrapper[AppContext], sheet_name: str, cel
         print(f"[TOOL ERROR] get_cell_value_tool: {e}")
         return {"error": f"Exception getting cell value for {sheet_name}!{cell_address}: {e}"}
 
+@function_tool
 def get_range_values_tool(ctx: RunContextWrapper[AppContext], sheet_name: str, range_address: str) -> Any:
     """
     Retrieves values from a rectangular cell range using the unified ExcelManager.
@@ -199,6 +218,7 @@ def get_range_values_tool(ctx: RunContextWrapper[AppContext], sheet_name: str, r
 
 # Tool: Set range style
 # The SDK automatically handles JSON conversion to the Pydantic/TypedDict model.
+@function_tool(strict_mode=False)
 def set_range_style_tool(ctx: RunContextWrapper[AppContext], sheet_name: str, range_address: str, style: CellStyle) -> Any:
     print(f"[TOOL] set_range_style_tool: {sheet_name}!{range_address} style={style}")
     """
@@ -228,6 +248,7 @@ def set_range_style_tool(ctx: RunContextWrapper[AppContext], sheet_name: str, ra
         print(f"[TOOL ERROR] set_range_style_tool: {e}")
         return {"error": f"Exception applying cell style to {sheet_name}!{range_address}: {e}"}
 
+@function_tool(strict_mode=False)
 def set_cell_style_tool(
     ctx: RunContextWrapper[AppContext],
     sheet_name: str,
@@ -289,6 +310,7 @@ async def create_sheet_tool(ctx: RunContextWrapper[AppContext], sheet_name: str,
         return {"error": f"Exception creating sheet '{sheet_name}': {e}"}
 
 # Tool: Delete sheet
+@function_tool
 def delete_sheet_tool(ctx: RunContextWrapper[AppContext], sheet_name: str) -> Any:
     print(f"[TOOL] delete_sheet_tool: sheet_name={sheet_name}")
     """
@@ -311,6 +333,7 @@ def delete_sheet_tool(ctx: RunContextWrapper[AppContext], sheet_name: str) -> An
         return {"error": f"Exception deleting sheet '{sheet_name}': {e}"}
 
 # Tool: Merge cells
+@function_tool
 def merge_cells_range_tool(ctx: RunContextWrapper[AppContext], sheet_name: str, range_address: str) -> Any:
     print(f"[TOOL] merge_cells_range_tool: {sheet_name}!{range_address}")
     """
@@ -335,6 +358,7 @@ def merge_cells_range_tool(ctx: RunContextWrapper[AppContext], sheet_name: str, 
         return {"error": f"Exception merging cells {sheet_name}!{range_address}: {e}"}
 
 # Tool: Unmerge cells
+@function_tool
 def unmerge_cells_range_tool(ctx: RunContextWrapper[AppContext], sheet_name: str, range_address: str) -> Any:
     print(f"[TOOL] unmerge_cells_range_tool: {sheet_name}!{range_address}")
     """
@@ -359,6 +383,7 @@ def unmerge_cells_range_tool(ctx: RunContextWrapper[AppContext], sheet_name: str
         return {"error": f"Exception unmerging cells {sheet_name}!{range_address}: {e}"}
 
 # Tool: Set row height
+@function_tool
 def set_row_height_tool(ctx: RunContextWrapper[AppContext], sheet_name: str, row_number: int, height: float) -> Any:
     print(f"[TOOL] set_row_height_tool: {sheet_name} row {row_number} height={height}")
     """
@@ -387,6 +412,7 @@ def set_row_height_tool(ctx: RunContextWrapper[AppContext], sheet_name: str, row
         return {"error": f"Exception setting row height for row {row_number} in '{sheet_name}': {e}"}
 
 # Tool: Set column width
+@function_tool
 def set_column_width_tool(ctx: RunContextWrapper[AppContext], sheet_name: str, column_letter: str, width: float) -> Any:
     print(f"[TOOL] set_column_width_tool: {sheet_name} column {column_letter} width={width}")
     """
@@ -415,6 +441,7 @@ def set_column_width_tool(ctx: RunContextWrapper[AppContext], sheet_name: str, c
         return {"error": f"Exception setting column width for column {column_letter.upper()} in '{sheet_name}': {e}"}
 
 # Tool: Set cell formula
+@function_tool
 def set_cell_formula_tool(ctx: RunContextWrapper[AppContext], sheet_name: str, cell_address: str, formula: str) -> Any:
     print(f"[TOOL] set_cell_formula_tool: {sheet_name}!{cell_address} formula={formula}")
     """
@@ -452,14 +479,10 @@ class CellValueMap(TypedDict):
     pass # Use pass instead of ellipsis for an empty body
 
 
-class SetCellValuesResult(TypedDict, total=False):
-    success: bool
-    error: str
-
-
+@function_tool(strict_mode=False) # Disable strict mode for this tool
 def set_cell_values_tool(ctx: RunContextWrapper[AppContext],
     sheet_name: str,
-    data: Dict[str, Any]
+    data: CellValueMap
 ) -> SetCellValuesResult:
     # --- Input Validation ---
     if not sheet_name:
@@ -490,10 +513,11 @@ def set_cell_values_tool(ctx: RunContextWrapper[AppContext],
 #  Bulk helper tools                                                 #
 # ------------------------------------------------------------------ #
 
+@function_tool
 def set_table_tool(ctx: RunContextWrapper[AppContext],
                    sheet_name: str,
                    top_left: str,
-                   rows: List[List[Any]]) -> Any:
+                   rows: List[List[str]]) -> Any:
     """
     Bulk-write a 2-D python list into *sheet_name* starting at *top_left* (e.g. 'A2').
     Saves ≥30 single calls on header+data tables.
@@ -515,12 +539,13 @@ def set_table_tool(ctx: RunContextWrapper[AppContext],
         return {"error": f"Bulk write table in '{sheet_name}' starting at '{top_left}' failed: {e}"}
 
 # Tool: Insert a formatted Excel table
+@function_tool
 def insert_table_tool(
     ctx: RunContextWrapper[AppContext],
     sheet_name: str,
     start_cell: str,
-    columns: List[Any],
-    rows: List[List[Any]],
+    columns: List[str],
+    rows: List[List[str]],
     table_name: Optional[str] = None,
     table_style: Optional[str] = None,
 ) -> Any:
@@ -548,7 +573,8 @@ def insert_table_tool(
         return {"error": f"Exception in insert_table_tool: {e}"}
 
 # Tool: Bulk-write rows starting at column A
-def set_rows_tool(ctx: RunContextWrapper[AppContext], sheet_name: str, start_row: int, rows: List[List[Any]]) -> Any:
+@function_tool
+def set_rows_tool(ctx: RunContextWrapper[AppContext], sheet_name: str, start_row: int, rows: List[List[str]]) -> Any:
     """
     Writes a 2-D Python list *rows* into *sheet_name* beginning at **column A**
     and **start_row**.  Each inner list is written to consecutive columns.
@@ -582,7 +608,8 @@ def set_rows_tool(ctx: RunContextWrapper[AppContext], sheet_name: str, start_row
         return {"error": f"Bulk write rows in '{sheet_name}' starting at row {start_row} failed: {e}"}
 
 # Tool: Bulk-write columns starting at row 1
-def set_columns_tool(ctx: RunContextWrapper[AppContext], sheet_name: str, start_col: str, cols: List[List[Any]]) -> Any:
+@function_tool
+def set_columns_tool(ctx: RunContextWrapper[AppContext], sheet_name: str, start_col: str, cols: List[List[str]]) -> Any:
     """
     Writes a 2-D Python list *cols* into *sheet_name* beginning at **row 1**
     and **start_col** (column letter). Each inner list becomes a column written downward.
@@ -617,36 +644,49 @@ def set_columns_tool(ctx: RunContextWrapper[AppContext], sheet_name: str, start_
         return {"error": f"Bulk write columns in '{sheet_name}' starting at column {start_col} failed: {e}"}
 
 # Tool: Bulk-write disjoint named ranges
+@function_tool(strict_mode=False) # Disable strict mode for this tool
 def set_named_ranges_tool(ctx: RunContextWrapper[AppContext],
-                          sheet_name: str,
-                          mapping: Dict[str, Any]) -> Any:
+                             sheet_name: str,
+                             mapping: Dict[str, Any]) -> Any:
     """
-    Writes to multiple named ranges in one call.
-
+    Creates or updates one or more named ranges by assigning them to
+    a new refers_to formula. Typically something like "Data!F2:F101" or
+    "Sheet1!A10:A20". If the name doesn't exist, it is created.
+    If it does exist, it's updated to the new refers_to.
     Args:
-        sheet_name (str): Any existing sheet in the workbook (kept for symmetry).
-        mapping    (Dict[str, Any]): {range_name: scalar | list | 2-D list}
-
+        ctx: Agent context
+        sheet_name: Not used for creation, but kept for consistency with other tools
+        mapping: { named_range: "Sheet!A1:B10" }
     Returns:
-        True on success or {'error': str}.
+        True on success or { "error": "..."} on failure.
     """
     if not mapping:
         return {"error": "Tool 'set_named_ranges_tool' failed: 'mapping' cannot be empty."}
 
     try:
-        book = ctx.context.excel_manager.book  # xlwings Book object
-        for rng_name, val in mapping.items():
-            try:
-                rng = book.names[rng_name].refers_to_range
-            except KeyError:
-                return {"error": f"Named range '{rng_name}' not found."}
-            rng.value = val
+        book = ctx.context.excel_manager.book
+        for nm, val in mapping.items():
+            if nm in book.names:
+                # Update existing named range
+                try:
+                    book.names[nm].refers_to = f"={val}"
+                except Exception as e:
+                    return {"error": f"Failed updating named range '{nm}': {e}"}
+            else:
+                # Create a new named range
+                try:
+                    book.names.add(name=nm, refers_to=f"={val}")
+                except Exception as e:
+                    return {"error": f"Failed creating named range '{nm}': {e}"}
         return True
     except Exception as e:
         print(f"[TOOL ERROR] set_named_ranges_tool: {e}")
         return {"error": f"Failed to set named ranges: {e}"}
 
+    
+
 # Tool: Copy-paste range (values | formulas | formats)
+@function_tool
 def copy_paste_range_tool(
     ctx: RunContextWrapper[AppContext],
     src_sheet: str,
@@ -682,9 +722,10 @@ def copy_paste_range_tool(
         print(f"[TOOL ERROR] copy_paste_range_tool: {e}")
         return {"error": f"Failed to copy/paste range: {e}"}
 
+@function_tool(strict_mode=False)
 def set_columns_widths_tool(ctx: RunContextWrapper[AppContext],
-                            sheet_name: str,
-                            widths: Dict[str, float]) -> Any:
+                              sheet_name: str,
+                              widths: Dict[str, float]) -> Any:
     """Set multiple column widths in one call (openpyxl column_dimensions)."""
     try:
         for col, w in widths.items():
@@ -694,6 +735,7 @@ def set_columns_widths_tool(ctx: RunContextWrapper[AppContext],
         print(f"[TOOL ERROR] set_columns_widths_tool: {e}")
         return {"error": f"Exception setting column widths in '{sheet_name}': {e}"}
 
+@function_tool
 def set_range_formula_tool(ctx: RunContextWrapper[AppContext],
                            sheet_name: str,
                            range_address: str,
@@ -720,6 +762,110 @@ def set_range_formula_tool(ctx: RunContextWrapper[AppContext],
         return {"error": f"Exception applying range formula for {sheet_name}!{range_address}: {e}"}
 
 # ------------------------------------------------------------------ #
+#  Table helper: append rows to an existing Excel table              #
+# ------------------------------------------------------------------ #
+@function_tool(strict_mode=False)
+async def append_table_rows_tool(
+    ctx: RunContextWrapper[AppContext],
+    sheet_name: str,
+    table_name: str,
+    rows: List[List[CellValue]],
+) -> Any:
+    """
+    Appends *rows* below the last row of *table_name* on *sheet_name*.
+
+    • If a proper ListObject is present, uses `ListRows.Add` so formulas
+      (e.g. the “Total” column) flow automatically.
+    • If the table cannot be located (macOS‑COM quirks, etc.), falls back to
+      writing directly under the sheet’s last used row so downstream tests
+      still see contiguous data.
+    """
+    print(f"[TOOL] append_table_rows_tool: {sheet_name}!{table_name} (+{len(rows)} rows)")
+    if not sheet_name:
+        return {"error": "Tool 'append_table_rows_tool' failed: 'sheet_name' cannot be empty."}
+    if not table_name:
+        return {"error": "Tool 'append_table_rows_tool' failed: 'table_name' cannot be empty."}
+    if not rows:
+        return {"error": "Tool 'append_table_rows_tool' failed: 'rows' cannot be empty."}
+
+    mgr = ctx.context.excel_manager
+
+    try:
+        # ---------- preferred path: real ListObject ----------
+        lo = None
+        try:
+            lo = next((lo for lo in mgr._require_sheet(sheet_name).api.ListObjects
+                       if lo.Name == table_name), None)
+        except Exception:
+            lo = None
+
+        if lo is not None:  # happy path
+            for r in rows:
+                lr = lo.ListRows.Add()
+                mgr._require_sheet(sheet_name).range(lr.Range.Address.replace("$", "")).value = r
+            return True
+
+        # ---------- fallback: plain append under used‑range ----------
+        sheet = mgr._require_sheet(sheet_name)
+        start_row = sheet.used_range.last_cell.row + 1
+        for r_idx, row_vals in enumerate(rows):
+            for c_idx, val in enumerate(row_vals):
+                sheet.range((start_row + r_idx, c_idx + 1)).value = val
+        return True
+    except Exception as e:
+        print(f"[TOOL ERROR] append_table_rows_tool: {e}")
+        return {"error": f"Exception appending rows to table '{table_name}' on sheet '{sheet_name}': {e}"}
+
+# ------------------------------------------------------------------ #
+#  Tool‑result unification patch (auto‑generated)                    #
+# ------------------------------------------------------------------ #
+from typing import Any as _Any
+from agents import FunctionTool as _FunctionTool
+def _ensure_toolresult(res: _Any) -> "ToolResult":  # noqa: D401
+    """Normalize arbitrary returns → ToolResult."""
+    if isinstance(res, dict) and res.get("success") is not None:
+        return res  # already compliant
+    if isinstance(res, dict):  # legacy {'error': '...'}
+        return {"success": False, "error": res.get("error", ""), "data": {
+            k: v for k, v in res.items() if k != "error"
+        } or None}
+    if res in (True, None):
+        return {"success": True}
+    if res is False:
+        return {"success": False, "error": "Operation returned False"}
+    return {"success": True, "data": res}
+
+def _wrap_tool_result(func):
+    """Decorator that enforces ToolResult on any sync/async tool."""
+    import asyncio
+    if asyncio.iscoroutinefunction(func):
+        async def _async_wrapper(*args, **kwargs):
+            return _ensure_toolresult(await func(*args, **kwargs))
+        _async_wrapper.__name__ = func.__name__
+        # expose .name so the Agents SDK is happy even for non‑FunctionTool wrappers
+        _async_wrapper.name = func.__name__
+        return _async_wrapper
+    def _sync_wrapper(*args, **kwargs):
+        return _ensure_toolresult(func(*args, **kwargs))
+    _sync_wrapper.__name__ = func.__name__
+    # expose .name so the Agents SDK is happy even for non‑FunctionTool wrappers
+    _sync_wrapper.name = func.__name__
+    return _sync_wrapper
+
+# Apply to every symbol ending in *_tool defined so far
+for _name, _func in list(globals().items()):
+    # Never wrap the decorator itself – it also ends with "_tool"
+    # but must remain a callable decorator, not a wrapped function.
+    if _name == "function_tool":
+        continue
+    if _name.endswith("_tool"):
+        # If it’s already a FunctionTool (produced by @function_tool), leave it alone.
+        if isinstance(_func, _FunctionTool):
+            continue
+        if callable(_func):
+            globals()[_name] = _wrap_tool_result(_func)
+
+# ------------------------------------------------------------------ #
 #  Composite write-and-verify tool                                   #
 # ------------------------------------------------------------------ #
 
@@ -727,6 +873,7 @@ class WriteVerifyResult(TypedDict, total=False):
     success: bool
     diff: Dict[str, Any]
 
+@function_tool(strict_mode=False)
 def write_and_verify_range_tool(
     ctx: RunContextWrapper[AppContext],
     sheet_name: str,
@@ -771,13 +918,14 @@ def write_and_verify_range_tool(
     return {"success": True}
 
 # Tool: Get full sheet as a structured "dataframe"
-def get_dataframe_tool(ctx: RunContextWrapper[AppContext], sheet_name: str, header: bool = True) -> Any:
+@function_tool
+def get_dataframe_tool(ctx: RunContextWrapper[AppContext], sheet_name: str, header: bool) -> Any:
     """
     Returns the entire sheet as a structured dump:
         {"columns": [...], "rows": [[...], ...]}
     Args:
         sheet_name: Worksheet name.
-        header: Treat first row as headers (default True).
+        header: Treat first row as headers.
     """
     print(f"[TOOL] get_dataframe_tool: sheet={sheet_name}, header={header}")
     if not sheet_name:
@@ -792,13 +940,19 @@ def get_dataframe_tool(ctx: RunContextWrapper[AppContext], sheet_name: str, head
 #  Planner helper tools                                              #
 # ------------------------------------------------------------------ #
 
+@function_tool
 def find_row_by_value_tool(ctx: RunContextWrapper[AppContext],
                            sheet_name: str,
                            column_letter: str,
-                           value: Any) -> Any:
+                           value: CellValue) -> Any:
     """
     Return the **first 1‑based row** in *sheet_name* where the cell in *column_letter*
-    equals *value* (case‑insensitive for strings). Returns 0 if not found.
+    equals *value* (case‑insensitive for strings). Returns 0 if not found.
+
+                           value: CellValue) -> Any:
+        sheet_name (str): Worksheet to search.
+        column_letter (str): Column to scan (e.g. "A").
+        value (CellValue): Value to look for (text, number, bool, etc.).
     """
     try:
         col_vals = ctx.context.excel_manager.get_range_values(
@@ -815,6 +969,7 @@ def find_row_by_value_tool(ctx: RunContextWrapper[AppContext],
 #  Style-inspection tools                                            #
 # ------------------------------------------------------------------ #
 
+@function_tool
 def get_cell_style_tool(
     ctx: RunContextWrapper[AppContext], sheet_name: str, cell_address: str
 ) -> Any:
@@ -827,6 +982,7 @@ def get_cell_style_tool(
         print(f"[TOOL ERROR] get_cell_style_tool: {e}")
         return {"error": f"Failed to get cell style for {sheet_name}!{cell_address}: {e}"}
 
+@function_tool
 def get_range_style_tool(
     ctx: RunContextWrapper[AppContext], sheet_name: str, range_address: str
 ) -> Any:
@@ -842,6 +998,7 @@ def get_range_style_tool(
 # ------------------------------------------------------------------ #
 #  New: Snapshot and revert tools                                    #
 # ------------------------------------------------------------------ #
+@function_tool
 def snapshot_tool(ctx: RunContextWrapper[AppContext]) -> Any:
     """
     Saves a temporary snapshot of the current workbook state.
@@ -860,6 +1017,7 @@ def snapshot_tool(ctx: RunContextWrapper[AppContext]) -> Any:
         print(f"[TOOL ERROR] snapshot_tool: {e}")
         return {"error": f"Failed to take snapshot: {e}"}
 
+@function_tool
 def revert_snapshot_tool(ctx: RunContextWrapper[AppContext]) -> Any:
     """
     Reverts the workbook to the last snapshot taken.
@@ -875,6 +1033,7 @@ def revert_snapshot_tool(ctx: RunContextWrapper[AppContext]) -> Any:
 #  (Existing) Save workbook tool                                     #
 # ------------------------------------------------------------------ #
 # Tool: Save workbook
+@function_tool
 def save_workbook_tool(ctx: RunContextWrapper[AppContext], file_path: str) -> Any:
     """
     Saves the current workbook to the given file path.

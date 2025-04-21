@@ -10,11 +10,13 @@ import os
 import shutil
 import tempfile
 import asyncio
-import logging
+import logging # Ensure logging is imported
+import os # Ensure os is imported
 from typing import Any, Dict, List, Optional, TYPE_CHECKING
 
 
 import xlwings as xw
+from xlwings.constants import LineStyle, BorderWeight, PasteType
 import re
 from openpyxl.utils import get_column_letter, column_index_from_string
 from openpyxl.utils.cell import coordinate_from_string
@@ -23,7 +25,57 @@ if TYPE_CHECKING:
     from .context import WorkbookShape # For type hinting
 
 
+# ── Cross‑platform style probe ────────────────────────────────────────────────
+def _safe_cell_style(cell) -> dict[str, Any]:
+    """Return {font:{bold}, fill:{start_color}} safely on every platform."""
+    style: dict[str, Any] = {}
+
+    # Bold --------------------------------------------------------------------
+    bold = None
+    for probe in (
+        lambda c: c.api.Font.Bold,   # fast on Windows
+        lambda c: c.font.bold,       # works everywhere
+    ):
+        try:
+            bold = probe(cell)
+            break
+        except Exception:
+            pass
+    if bold is not None:
+        style.setdefault("font", {})["bold"] = bool(bold)
+
+    # Fill --------------------------------------------------------------------
+    color = None
+    for probe in (
+        lambda c: c.api.Interior.Color,
+        lambda c: c.color,
+    ):
+        try:
+            color = probe(cell)
+            break
+        except Exception:
+            pass
+    if color not in (None, 0):
+        style.setdefault("fill", {})["start_color"] = _bgr_int_to_argb_hex(color)
+
+    return style
+
+
 class ExcelManager:
+    def _normalise_rows(self, columns: list[Any], rows: list[list[Any]]) -> list[list[Any]]:
+        """Pad or truncate each row so they're exactly as wide as `columns`."""
+        width = len(columns)
+        fixed: list[list[Any]] = []
+        for r in rows:
+            if len(r) < width:
+                # pad short rows
+                fixed.append(r + [None] * (width - len(r)))
+            elif len(r) > width:
+                # truncate long rows
+                fixed.append(r[:width])
+            else:
+                fixed.append(r)
+        return fixed
     """Single realtime manager that always drives a visible Excel instance."""
 
     # â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
@@ -36,6 +88,7 @@ class ExcelManager:
         *,
         kill_others: bool = False,
         attach_existing: bool = False,
+        single_workbook: bool = True,
     ) -> None:
         """
         Prepare an ExcelManager.
@@ -51,14 +104,18 @@ class ExcelManager:
             If *True*, attempt to quit all running Excel instances *before* launching
             a fresh one.  Defaults to *False* (do not disturb other sessions).
         attach_existing:
-            If *True* **and** an Excel instance is already running, reâ€‘use the
+            If *True* **and** an Excel instance is already running, re-use the
             active instance instead of launching a new one.
+        single_workbook:
+            If *True*, automatically close all other open workbooks in the same Excel instance,
+            leaving only the one managed by this class.
         """
         # Configuration only â€“ real work happens in ``__aenter__``.
         self._file_path = file_path
         self._visible = visible
         self._kill_others = kill_others
         self._attach_existing = attach_existing
+        self._single_workbook = single_workbook
 
         # Handles populated later
         self.app: Optional[xw.App] = None
@@ -66,63 +123,201 @@ class ExcelManager:
 
         # Tracking for snapshot / undo helper
         self._snapshot_path: Optional[str] = None
+        self._attached_mode: bool = False # Flag to track if we attached to existing Excel
+
     # â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
-    #  Async contextâ€‘manager helpers
+    #  Async contextâ€‘manager helpers
     # â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
     async def __aenter__(self) -> "ExcelManager":
         """Initialise Excel resources on entering an ``async with`` block."""
-        if self.app is None:
-            # Optionally close other Excel processes
-            if self._kill_others:
-                for _app in xw.apps:
-                    try:
-                        _app.quit()
-                    except Exception:
-                        pass
+        # Removed the premature check:
+        # if not self.app or self.app.pid is None: return
 
-            # Optionally attach to an existing process
-            if self._attach_existing and xw.apps:
+        logger = logging.getLogger(__name__)
+        logger.debug("Entering ExcelManager.__aenter__...") # Added debug log
+        self.app = None
+        self.book = None
+        self._attached_mode = False # Reset flag on entry
+
+        # Optionally close other Excel processes
+        if self._kill_others:
+            logger.info("Attempting to quit other running Excel instances...")
+            killed_count = 0
+            for _app in xw.apps:
                 try:
-                    self.app = xw.apps.active
-                except Exception:
-                    self.app = None
+                    _app.quit()
+                    killed_count += 1
+                except Exception as e:
+                    logger.warning("Could not quit an Excel instance: %s", e)
+            logger.info("Quit %d other Excel instance(s).", killed_count)
 
-            # Otherwise start a new instance
-            if self.app is None:
-                self.app = xw.App(visible=self._visible, add_book=False)
+        # Optionally attach to an existing process
+        if self._attach_existing and xw.apps:
+            try:
+                self.app = xw.apps.active
+                self._attached_mode = True # Set flag
+                logger.info("Attached to existing Excel instance (PID: %s)", self.app.pid)
+            except Exception as e:
+                logger.warning("Failed to attach to existing Excel instance: %s. Starting new instance.", e)
+                self.app = None
+                self._attached_mode = False # Ensure flag is False if attach fails
 
-            # Open or create workbook
-            if self._file_path:
-                self.book = self.app.books.open(self._file_path)
+        # Start a new instance if needed
+        if self.app is None:
+            logger.info("Starting new Excel instance...")
+            # Ensure add_book=False is critical here to avoid premature workbook creation
+            self.app = xw.App(visible=self._visible, add_book=False)
+            self._attached_mode = False # Explicitly false if we created a new app
+            logger.info("New Excel instance started (PID: %s)", self.app.pid)
+
+
+        # --- Workbook Handling ---
+        target_file_name = os.path.basename(self._file_path) if self._file_path else None
+        logger.debug("Target file name: %s, Attached mode: %s", target_file_name, self._attached_mode)
+
+        if self._attached_mode:
+            # We are attached to an existing app. Try to find the target book or use active/add new.
+            found_book = None
+            if target_file_name:
+                logger.debug("Attached mode: Looking for workbook '%s' in %d open books.", target_file_name, len(self.app.books))
+                for wb in self.app.books:
+                    if wb.name == target_file_name:
+                        found_book = wb
+                        logger.info("Found target workbook '%s' already open in attached instance.", target_file_name)
+                        break
+                if not found_book:
+                    # Book not found, try opening it
+                    try:
+                        logger.info("Opening specified workbook '%s' in attached instance...", self._file_path)
+                        found_book = self.app.books.open(self._file_path)
+                    except Exception as e:
+                        logger.error("Failed to open specified workbook '%s' in attached instance: %s. Creating a new blank workbook instead.", self._file_path, e)
+                        # Fallback to adding a new book if open fails
+                        found_book = self.app.books.add()
+                        logger.info("Added new blank workbook to attached instance as fallback.")
             else:
-                self.book = self.app.books.add()
+                # No file specified. Use active if available, otherwise add new.
+                if self.app.books:
+                    found_book = self.app.books.active # Use the currently active book
+                    logger.info("Using active workbook '%s' in attached instance (no file specified).", found_book.name)
+                else:
+                    # No books open in the attached instance, add one.
+                    logger.info("No workbooks open in attached instance. Adding a new blank workbook.")
+                    found_book = self.app.books.add()
 
-            # Ensure at least one sheet exists
-            if not self.book.sheets:
-                self.book.sheets.add()
+            self.book = found_book
 
+        else:
+            # We created a new app instance. Open file or add new book.
+            if self._file_path:
+                logger.info("Opening specified workbook '%s' in new instance...", self._file_path)
+                try:
+                    self.book = self.app.books.open(self._file_path)
+                except Exception as e:
+                    logger.error("Failed to open specified workbook '%s' in new instance: %s. Creating a new blank workbook instead.", self._file_path, e)
+                    self.book = self.app.books.add() # Fallback
+                    logger.info("Added new blank workbook to new instance as fallback.")
+
+            else:
+                # ── If we created a new Excel instance and the caller didn’t ask
+                #    for a specific file, Excel may already have opened Book1.
+                if self.app.books:                           # ← NEW guard
+                    self.book = self.app.books[0]            # ← reuse Book1
+                    logger.info("Re‑using default workbook %s", self.book.name)
+                else:                                        # Excel really is empty
+                    logger.info("Adding new blank workbook to new instance…")
+                    self.book = self.app.books.add()
+
+        # Ensure the managed book is activated and visible
+        if self.book:
+            try:
+                logger.debug("Activating workbook: %s", self.book.name)
+                self.book.activate()
+                logger.info("Managed workbook set to: %s", self.book.name)
+                if self._visible and hasattr(self.app, 'activate'):
+                    logger.debug("Activating Excel application window.")
+                    self.app.activate(steal_focus=True)
+            except Exception as e:
+                logger.warning("Could not activate workbook '%s': %s", self.book.name, e)
+
+            # If single_workbook is True, close all other workbooks
+            if self._single_workbook:
+                extra_count = 0
+                for wb in list(self.app.books):
+                    if wb != self.book:
+                        wb.close()
+                        extra_count += 1
+                if extra_count > 0:
+                    logger.info("Closed %d extra workbook(s). Only one workbook remains.", extra_count)
+        else:
+            # This case should ideally not happen if the logic above is correct
+            raise RuntimeError("Failed to obtain a workbook handle within ExcelManager.__aenter__.")
+
+
+        # Ensure at least one sheet exists in the managed book
+        if self.book and not self.book.sheets:
+            logger.info("Workbook '%s' has no sheets. Adding default sheet 'Sheet1'.", self.book.name)
+            self.book.sheets.add(name="Sheet1") # Give it a default name
+
+        logger.debug("ExcelManager.__aenter__ completed.")
         return self
 
     async def __aexit__(self, exc_type, exc_val, exc_tb) -> None:
-        """Gracefully close workbook and guarantee the Excel process dies."""
+        """Gracefully close the managed workbook and potentially the Excel app."""
+        logger = logging.getLogger(__name__)
+        logger.debug("ExcelManager.__aexit__ started (Attached mode: %s)", self._attached_mode)
+        was_attached = self._attached_mode # Capture state before cleanup
+
         try:
+            # --- Close the managed Workbook ---
             if self.book:
+                book_name = "Unknown"
                 try:
-                    self.book.close()
-                except Exception:
-                    pass
+                    book_name = self.book.name # Get name before attempting close
+                    # Check if the book is still valid/open within the app before trying to close
+                    # Need to handle potential app termination before book close
+                    if self.app and self.book in self.app.books:
+                        logger.info("Closing managed workbook: %s", book_name)
+                        # Close without saving changes unless explicitly handled elsewhere (e.g., by save tool)
+                        self.book.close(save_changes=False)
+                    else:
+                        logger.warning("Managed workbook '%s' seems to be already closed or app is unavailable.", book_name)
+                except Exception as e:
+                    logger.error("Error closing workbook '%s': %s", book_name, e)
+                finally:
+                    self.book = None # Clear handle regardless
+            else:
+                logger.debug("__aexit__: No workbook handle to close.")
         finally:
-            if self.app:
+            # --- Quit/Kill the Excel Application ---
+            if self.app and not was_attached:
+                # Only quit/kill the app if *we* created it
+                app_pid = self.app.pid
+                logger.info("Quitting Excel instance (PID: %s) as it was created by this manager.", app_pid)
                 try:
                     # Use kill when available to prevent zombie COM hosts
                     if hasattr(self.app, "kill"):
+                        logger.debug("Using app.kill() for PID: %s", app_pid)
                         self.app.kill()
                     else:
+                        logger.debug("Using app.quit() for PID: %s", app_pid)
                         self.app.quit()
-                except Exception:
-                    pass
+                    logger.info("Excel instance (PID: %s) quit/killed.", app_pid)
+                except Exception as e:
+                    logger.error("Error quitting/killing Excel app (PID: %s): %s", app_pid, e)
+                finally:
+                    self.app = None # Clear handle regardless
+            elif self.app and was_attached:
+                logger.info("Leaving attached Excel instance (PID: %s) running.", self.app.pid)
+                # Clear the handle, but don't quit the app
                 self.app = None
-                self.book = None
+            else:
+                # App handle might already be None if creation failed or already cleaned up
+                logger.debug("__aexit__: No app handle to clean up or already cleaned.")
+
+            # Reset flag for potential reuse (though usually not done with async with)
+            self._attached_mode = False
+        logger.debug("ExcelManager.__aexit__ completed.")
 
     # Optional synchronous helper for legacy callâ€‘sites
     def close(self) -> None:
@@ -176,7 +371,10 @@ class ExcelManager:
             # Force a visual and calculation refresh
             self.app.screen_updating = False
             self.app.screen_updating = True
-            self.app.calculate()
+            try:
+                self.app.calculate()
+            except Exception as calc_err:
+                logger.debug(f"self.app.calculate() failed (ignored): {calc_err}")
 
             # Reâ€‘activate active sheet to nudge UI
             active_sheet = self.book.sheets.active
@@ -309,8 +507,14 @@ class ExcelManager:
 
                 # Get headers (first row) - handle potential errors/empty rows
                 try:
-                    # Reading row 1 can be slow on huge sheets, optimize if needed later
-                    header_values = sheet.range((1, 1)).expand('right').value or []
+                    # Fast path: fetch first row directly through COM to avoid many Range calls
+                    used_range = sheet.api.UsedRange
+                    # Bail out completely on extremely wide sheets (≫ token budget & very slow)
+                    if used_range.Columns.Count > 2000:
+                        logger.debug(f"Sheet '{sheet_name}': Skipping header scan — {used_range.Columns.Count} columns (>2000).")
+                        header_values = []
+                    else:
+                        header_values = used_range.Rows(1).Value2 or []
                     if isinstance(header_values, list):
                         # Track the original length for logging
                         original_length = len(header_values)
@@ -373,10 +577,21 @@ class ExcelManager:
         except (KeyError, ValueError):
             return None
 
+    def fill_ranges(self, sheet_name: str, ranges: list[str], color_argb: str) -> None:
+        """
+        Apply a fill color to all listed ranges in one go,
+        to reduce repeated COM calls.
+        """
+        sheet = self._require_sheet(sheet_name)
+        for rng in ranges:
+            # Convert 8‑digit ARGB hex (e.g. "FF3366CC") to BGR int for Excel
+            sheet.range(rng).color = _hex_argb_to_bgr_int(color_argb)
+
     # â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
     #  Cell value helpers
     # â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
     def set_cell_value(self, sheet_name: str, cell_address: str, value: Any) -> None:
+
         sheet = self._require_sheet(sheet_name)
         sheet.range(cell_address).value = value
 
@@ -468,8 +683,7 @@ class ExcelManager:
             color = style["font"].get("color")
             if color is not None:
                 try:
-                    rgb_tuple = _hex_argb_to_bgr_int(color)
-                    rng.font.color = rgb_tuple
+                    rng.font.color = _to_bgr(color)
                 except:
                     pass
 
@@ -482,8 +696,7 @@ class ExcelManager:
             if "start_color" in style["fill"]:
                 rgb = style["fill"]["start_color"]
                 try:
-                    color_int = _hex_argb_to_bgr_int(rgb)
-                    rng.color = color_int
+                    rng.color = _to_bgr(rgb)
                 except Exception as e:
                     print(f"Color application error: {e}")
 
@@ -492,36 +705,63 @@ class ExcelManager:
             try:
                 border = style["border"]
 
-                # Determine whether to apply one style to every edge
-                apply_all = any(k in border for k in ("outline", "outside", "all"))
+                # If 'outline' is set, try using BorderAround as a fallback,
+                # because rng.api.Borders(...) can fail on some Mac Excel versions.
+                outline_requested = border.get("outline", False) is True
 
-                edges = {
-                    "left": 7,
-                    "right": 10,
-                    "top": 8,
-                    "bottom": 9,
-                }
+                if outline_requested:
+                    # We'll apply an outside border using BorderAround
+                    # Default to 'thin' if no style provided
+                    border_style = border.get("style", "thin")
+                    weight_map = {
+                        "thin": BorderWeight.thin,
+                        "medium": BorderWeight.medium,
+                        "thick": BorderWeight.thick,
+                    }
+                    color_hex = border.get("color", "FF000000")  # default black
+                    try:
+                        rng.api.BorderAround(
+                            Weight=weight_map.get(border_style, BorderWeight.thin),
+                            LineStyle=LineStyle.continuous,
+                        )
+                        rng.api.Borders.Color = _to_bgr(color_hex)
+                    except Exception as e:
+                        print(f"BorderAround application error: {e}")
+                else:
+                    # We'll attempt the Windows COM approach for each edge
+                    # but it may fail on Mac. If it fails, we skip partial edges.
+                    try:
+                        edges = {
+                            "left": 7,
+                            "right": 10,
+                            "top": 8,
+                            "bottom": 9,
+                        }
 
-                def _apply_edge(edge_idx: int, edge_key: str | None = None) -> None:
-                    edge_style = border if apply_all else border.get(edge_key, {})
-                    if edge_key and edge_key not in border and not apply_all:
-                        return
-                    xl_edge = rng.api.Borders(edge_idx)
-                    xl_edge.LineStyle = 1  # xlContinuous
+                        def _apply_edge(edge_key: str) -> None:
+                            edge_style = border.get(edge_key, {})
+                            xl_edge = rng.api.Borders(edges[edge_key])
+                            xl_edge.LineStyle = LineStyle.continuous
+                            weight_map = {
+                                "thin": BorderWeight.thin,
+                                "medium": BorderWeight.medium,
+                                "thick": BorderWeight.thick,
+                            }
+                            xl_edge.Weight = weight_map.get(
+                                str(edge_style.get("style", "thin")).lower(),
+                                BorderWeight.thin,
+                            )
+                            if "color" in edge_style:
+                                try:
+                                    xl_edge.Color = _to_bgr(edge_style["color"])
+                                except Exception:
+                                    pass
 
-                    weight_map = {"thin": 2, "medium": -4138, "thick": 4}
-                    xl_edge.Weight = weight_map.get(
-                        str(edge_style.get("style", "thin")).lower(), 2
-                    )
-
-                    if "color" in edge_style:
-                        try:
-                            xl_edge.Color = _hex_argb_to_bgr_int(edge_style["color"])
-                        except Exception:
-                            pass
-
-                for edge_name, edge_idx in edges.items():
-                    _apply_edge(edge_idx, edge_name)
+                        for edge_name in ("left", "right", "top", "bottom"):
+                            if edge_name in border:
+                                _apply_edge(edge_name)
+                    except Exception as e:
+                        print(f"Border application error (edge-level): {e}")
             except Exception as e:
                 print(f"Border application error: {e}")
 
@@ -554,15 +794,6 @@ class ExcelManager:
             if wrap is not None:
                 rng.api.WrapText = bool(wrap)
 
-        # Force update the Excel application to show changes
-        try:
-            self.app.screen_updating = False
-            self.app.screen_updating = True
-        except:
-            pass
-            except Exception as e:
-                print(f"Border application error: {e}")
-                
         # Force update the Excel application to show changes
         try:
             self.app.screen_updating = False
@@ -676,9 +907,9 @@ class ExcelManager:
                 f"Invalid paste_opts '{paste_opts}'. Use 'values', 'formulas', or 'formats'."
             )
 
-    # â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+    # â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
     #  (Currently stub) advanced APIs
-    # â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+    # â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
     def set_cell_formula(self, sheet_name: str, cell_address: str, formula: str) -> None:
         if not formula.startswith("="):
             formula = "=" + formula
@@ -689,44 +920,18 @@ class ExcelManager:
     # â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
     def get_cell_style(self, sheet_name: str, cell_address: str) -> Dict[str, Any]:  # noqa: D401
         """Return a minimal style dict (bold + fill color) for a single cell."""
-        sheet = self._require_sheet(sheet_name)
-        rng = sheet.range(cell_address)
-
-        style: Dict[str, Any] = {}
-
-        # Font â†’ bold
-        bold = rng.api.Font.Bold
-        if bold is not None:
-            style["font"] = {"bold": bool(bold)}
-
-        # Fill â†’ start_color
-        interior_color = rng.api.Interior.Color
-        if interior_color not in (None, 0):  # 0 = no fill
-            style["fill"] = {"start_color": _bgr_int_to_argb_hex(interior_color)}
-
-        return style
+        return _safe_cell_style(self._require_sheet(sheet_name).range(cell_address))
 
     def get_range_style(self, sheet_name: str, range_address: str) -> Dict[str, Dict[str, Any]]:  # noqa: D401
         """
         Return {cell_address: style_dict} for every cell in the range (minimal style set).
         """
-        sheet = self._require_sheet(sheet_name)
-        rng = sheet.range(range_address)
-        result: Dict[str, Dict[str, Any]] = {}
-        for c in rng:
-            addr = c.address.replace("$", "")
-            font_bold = c.api.Font.Bold
-            fill_color = c.api.Interior.Color
-            cell_style: Dict[str, Any] = {}
-            if font_bold is not None:
-                cell_style["font"] = {"bold": bool(font_bold)}
-            if fill_color not in (None, 0):
-                cell_style.setdefault("fill", {})["start_color"] = _bgr_int_to_argb_hex(
-                    fill_color
-                )
-            if cell_style:
-                result[addr] = cell_style
-        return result
+        rng = self._require_sheet(sheet_name).range(range_address)
+        return {
+            c.address.replace("$", ""): _safe_cell_style(c)
+            for c in rng
+            if _safe_cell_style(c)
+        }
 
     # Data-frame style dump for inspection / verification
     def get_sheet_dataframe(self, sheet_name: str, header: bool = True):
@@ -849,6 +1054,20 @@ def _hex_argb_to_bgr_int(argb: str) -> int:
     # Drop alpha then swap to BGR
     r, g, b = s[2:4], s[4:6], s[6:8]
     return int(f"{b}{g}{r}", 16)
+
+
+# --------------------------------------------------------------------------
+#  Cached colour converter
+# --------------------------------------------------------------------------
+_COLOR_CACHE: dict[str, int] = {}
+
+
+def _to_bgr(argb: str) -> int:
+    """
+    Convert 8‑digit ARGB → BGR int with caching to avoid repeated
+    `_hex_argb_to_bgr_int` calls inside tight loops.
+    """
+    return _COLOR_CACHE.setdefault(argb, _hex_argb_to_bgr_int(argb))
 
 
 def _bgr_int_to_argb_hex(color_int: int) -> str:

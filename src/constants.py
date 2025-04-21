@@ -26,3 +26,12 @@ WRITE_TOOLS = {
     "append_table_rows_tool",
     # Exclude save_workbook_tool as it doesn't change the structure/content itself
 }
+
+# ------------------------------------------------------------------
+#  Post‑definition patch: keep bookkeeping in sync even if the
+#  original WRITE_TOOLS literal is copied elsewhere.
+# ------------------------------------------------------------------
+WRITE_TOOLS |= {
+    "set_range_style_tool", "set_cell_style_tool",
+    "set_cell_formula_tool", "set_range_formula_tool",
+}

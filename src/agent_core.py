@@ -1,4 +1,7 @@
-from agents import Agent, function_tool, RunContextWrapper
+from agents import Agent, function_tool, FunctionTool, RunContextWrapper
+from typing import Optional # Added for type hinting
+
+# Import all tools directly - they should be decorated in tools.py
 from .tools import (
     open_workbook_tool,
     snapshot_tool,
@@ -7,11 +10,10 @@ from .tools import (
     get_active_sheet_name_tool,
     set_cell_value_tool,
     get_cell_value_tool,
-    get_range_values_tool,  # Tool for verifying ranges
-    find_row_by_value_tool, # Planner helper: locate row by value
-    get_dataframe_tool,     # Dump entire sheet as structured data
+    get_range_values_tool,
+    find_row_by_value_tool,
+    get_dataframe_tool,
     set_range_style_tool,
-    set_cell_style_tool,
     set_cell_style_tool,
     create_sheet_tool,
     delete_sheet_tool,
@@ -22,74 +24,25 @@ from .tools import (
     set_columns_widths_tool,
     set_range_formula_tool,
     set_cell_formula_tool,
-    set_cell_values_tool,  # Bulk tool
-    set_table_tool,        # Bulk write table tool
-    set_rows_tool,         # Bulk write rows starting at a given row
-    set_columns_tool,      # Bulk write columns starting at a given column
-    set_named_ranges_tool, # Disjoint named ranges
-    insert_table_tool,     # Insert formatted table tool
-    copy_paste_range_tool, # Copy + paste‑special helper
-    write_and_verify_range_tool,  # Composite write+verify
-    get_cell_style_tool,          # Style inspectors
+    set_cell_values_tool,
+    set_table_tool,
+    set_rows_tool,
+    set_columns_tool,
+    set_named_ranges_tool,
+    append_table_rows_tool,
+    insert_table_tool,
+    copy_paste_range_tool,
+    write_and_verify_range_tool,
+    get_cell_style_tool,
     get_range_style_tool,
     save_workbook_tool,
-    CellValueMap,  # Import type for clarity if needed later
-    CellStyle,     # Import type for clarity if needed later
+    CellValueMap,
+    CellStyle,
 )
-from typing import Optional # Added for type hinting
-from .context import AppContext
+from .context import AppContext, WorkbookShape # Ensure WorkbookShape is imported if used directly
 from .hooks import ActionLoggingHooks
-
-# ──────────────────────────────────────────────────────────────
-#  Helper: decorate many tools in one go
-# ──────────────────────────────────────────────────────────────
-def _decorate_all(ns: dict, names: list[str]) -> None:
-    """
-    Apply ``@function_tool(strict_mode=False)`` to each function whose name
-    appears in *names* and lives in the supplied *ns* namespace.
-    """
-    for name in names:
-        try:
-            ns[name] = function_tool(ns[name], strict_mode=False)
-        except KeyError as exc:
-            raise KeyError(f"_decorate_all: '{name}' not found in namespace.") from exc
-
-
-_DECORATED_TOOL_NAMES = [
-    "get_sheet_names_tool",
-    "get_active_sheet_name_tool",
-    "set_cell_value_tool",
-    "get_cell_value_tool",
-    "get_range_values_tool",
-    "get_dataframe_tool",
-    "set_range_style_tool",
-    "set_cell_style_tool",
-    "delete_sheet_tool",
-    "merge_cells_range_tool",
-    "unmerge_cells_range_tool",
-    "set_row_height_tool",
-    "set_column_width_tool",
-    "set_columns_widths_tool",
-    "set_range_formula_tool",
-    "set_cell_formula_tool",
-    "set_cell_values_tool",
-    "set_table_tool",
-    "set_rows_tool",
-    "set_columns_tool",
-    "find_row_by_value_tool",
-    "copy_paste_range_tool",
-    "set_named_ranges_tool",
-    "save_workbook_tool",
-    "open_workbook_tool",
-    "snapshot_tool",
-    "revert_snapshot_tool",
-    "write_and_verify_range_tool",
-    "get_cell_style_tool",
-    "get_range_style_tool",
-    "insert_table_tool",
-]
-
-_decorate_all(globals(), _DECORATED_TOOL_NAMES)
+# tool_wrapper is likely only needed if you apply @with_retry in tools.py
+# from .tool_wrapper import with_retry
 
 # --- Configuration ---
 MAX_SHEETS_IN_PROMPT = 30
@@ -99,7 +52,7 @@ def _compact_headers(headers):
     """
     Compacts header representations to reduce token usage.
     Converts repetitive empty headers to a more compact form.
-    
+
     Examples:
     - ["Name", "", "", "", "Date"] -> ["Name", "...", "Date"]
     - ["", "", "", ""] -> [] (all empty case)
@@ -107,20 +60,20 @@ def _compact_headers(headers):
     """
     if not headers:
         return []
-    
+
     # If we already have few headers or none are empty, return as is
     empty_count = sum(1 for h in headers if not h)
     if len(headers) <= 10 or empty_count == 0:
         return headers
-    
+
     # If all headers are empty, return an empty list
     if empty_count == len(headers):
         return []
-    
+
     # Compact format: find meaningful headers and compress empty spans
     result = []
     empty_streak = 0
-    
+
     for i, header in enumerate(headers):
         if not header:  # Empty header
             empty_streak += 1
@@ -130,75 +83,82 @@ def _compact_headers(headers):
                 result.append("...")
         else:  # Non-empty header
             empty_streak = 0
-            result.append(header)
-    
+            result.append(str(header)) # Ensure string conversion
+
     # Remove trailing ellipsis if present
     if result and result[-1] == "...":
         result.pop()
-        
+
     return result
 
-def _format_workbook_shape(shape: Optional[AppContext.shape.__class__]) -> str: # Use __class__ for type hint robustness
+def _format_workbook_shape(shape: Optional[WorkbookShape]) -> str: # Use WorkbookShape directly
     """Formats the WorkbookShape into a string for the prompt, respecting limits."""
     import logging
     logger = logging.getLogger(__name__)
-    
+
     if not shape:
         # Treat the first, shape‑less scan as version 1 so later math never sees v=0.
         return "<workbook_shape v=1></workbook_shape>"
 
     # Limit sheets included in the prompt
     limited_sheets = list(shape.sheets.items())[:MAX_SHEETS_IN_PROMPT]
-    limited_headers = {s: h for s, h in shape.headers.items() if s in dict(limited_sheets)}
+    limited_sheet_names = {s_name for s_name, _ in limited_sheets} # Set for faster lookup
+    limited_headers = {s: h for s, h in shape.headers.items() if s in limited_sheet_names}
     # Named ranges are usually fewer, include all for now
     named_ranges = shape.names.items()
 
     sheets_str = '; '.join(f'{s}:{rng}' for s, rng in limited_sheets) if limited_sheets else ""
-    
+
     # Process headers - compact them and limit per sheet
     processed_headers = {}
     total_original_headers = 0
     total_compacted_headers = 0
-    
+
     for sheet_name, headers in limited_headers.items():
-        total_original_headers += len(headers)
-        
+        original_len = len(headers)
+        total_original_headers += original_len
+
         # First compact the headers to reduce empty spans
         compacted = _compact_headers(headers)
-        
+        compacted_len_after_compact = len(compacted)
+
         # Then limit to maximum number of headers if still large
-        if len(compacted) > MAX_HEADERS_PER_SHEET:
+        if compacted_len_after_compact > MAX_HEADERS_PER_SHEET:
             # Keep first and last few headers with an ellipsis in between
-            front_headers = compacted[:MAX_HEADERS_PER_SHEET // 2]
-            back_headers = compacted[-MAX_HEADERS_PER_SHEET // 2:]
+            front_count = MAX_HEADERS_PER_SHEET // 2
+            back_count = MAX_HEADERS_PER_SHEET - front_count # Adjust back count
+            front_headers = compacted[:front_count]
+            back_headers = compacted[-back_count:]
             compacted = front_headers + ["..."] + back_headers
-            logger.debug(f"Sheet '{sheet_name}': Headers truncated from {len(compacted)} to {len(front_headers) + 1 + len(back_headers)} due to MAX_HEADERS_PER_SHEET limit")
-        
+            logger.debug(f"Sheet '{sheet_name}': Headers truncated from {compacted_len_after_compact} to {len(compacted)} due to MAX_HEADERS_PER_SHEET limit")
+
         processed_headers[sheet_name] = compacted
-        total_compacted_headers += len(compacted)
-        
-        # Log individual sheet stats
-        if len(headers) > 10:  # Only log if there's significant compaction
-            logger.debug(f"Sheet '{sheet_name}': Headers compacted from {len(headers)} to {len(compacted)} items")
-    
+        final_compacted_len = len(compacted)
+        total_compacted_headers += final_compacted_len
+
+        # Log individual sheet stats only if significant changes occurred
+        if original_len > 10 and original_len != final_compacted_len:
+             logger.debug(f"Sheet '{sheet_name}': Headers optimized from {original_len} to {final_compacted_len} items")
+
     # Log overall stats
     if total_original_headers > 0:
-        reduction_percent = ((total_original_headers - total_compacted_headers) / total_original_headers) * 100
+        reduction_percent = 0
+        if total_original_headers > 0: # Avoid division by zero
+             reduction_percent = ((total_original_headers - total_compacted_headers) / total_original_headers) * 100
         logger.info(f"Workbook shape optimization: Reduced headers from {total_original_headers} to {total_compacted_headers} items ({reduction_percent:.1f}% reduction)")
-    
-    # Only include headers for sheets present in the limited list
-    headers_str = '; '.join(f'{s}:{",".join(h)}' for s, h in processed_headers.items() if h) if processed_headers else ""
-    
+
+    headers_str = '; '.join(f'{s}:{",".join(map(str,h))}' for s, h in processed_headers.items() if h) if processed_headers else ""
+
     # Include named ranges
     names_str = '; '.join(f'name:{n}={ref}' for n, ref in named_ranges) if named_ranges else ""
 
     # Assemble the final string, filtering empty sections
     shape_content_parts = [part for part in [sheets_str, headers_str, names_str] if part]
     shape_content = '\n'.join(shape_content_parts)
-    
+
     final_shape = f"<workbook_shape v={shape.version}>\n{shape_content}\n</workbook_shape>"
     logger.debug(f"Final workbook shape size: {len(final_shape)} characters")
-    
+
     return final_shape
 
 
@@ -211,34 +171,33 @@ def _dynamic_instructions(wrapper: RunContextWrapper[AppContext], agent: Agent) 
     app_ctx = wrapper.context
     # Fetch shape directly from AppContext field
     shape_str = _format_workbook_shape(app_ctx.shape)
-    summary = app_ctx.state.get("summary") # Summary still comes from state dict
+    raw_summary = app_ctx.state.get("summary", "")  # Summary still comes from state dict
 
-    prompt_parts = [SYSTEM_PROMPT, shape_str] # Place shape after main prompt
-    if summary:
+    prompt_parts = [SYSTEM_PROMPT, shape_str]  # Place shape after main prompt
+    if raw_summary:
+        # Cap summary lines to last 30 entries to limit context size
+        lines = raw_summary.splitlines()
+        capped_lines = lines[-30:]
+        summary = "\n".join(capped_lines)
         prompt_parts.append(f"<progress_summary>\n{summary}\n</progress_summary>")
 
     return "\n\n".join(prompt_parts)
 
 
 SYSTEM_PROMPT="""
-You are a powerful **agentic Spreadsheet AI**, running inside the OpenAI Agents SDK.  
-Your hands are the Excel‑specific tools provided in this session;
-Your arena is a real-time Excel workbook opened via xlwings; changes appear immediately in the user's Excel application.
+You are a powerful **agentic Spreadsheet AI**, running in a real-time Excel environment using xlwings. 
 
-You **ONLY** accomplish things by invoking those tools.  
-Never mention tool names, schemas, or internal reasoning to the USER.
+You are working with a user with their own Excel workbook, which may contain multiple sheets, tables, and named ranges.
+Your arena is a real-time Excel workbook opened via xlwings; changes appear immediately in the user's Excel application.
+Your task may involve creating new sheets, modifying existing ones, or working with data in various formats.
+Your main goal is to assist the user in their Excel workbook(s) by following their instructions and providing accurate results.
 
 <mission>
-Turn every user request into the *minimum, safest* sequence of tool calls that
+TO turn every user request into the *minimum, safest* sequence of tool calls that
 delivers exactly what they asked for while preserving unrelated data,
 formulas, and styles.
 </mission>
 
-<user_preferences>
-• Prefers blunt, opinionated answers with zero fluff.  
-• Loves single‑sentence summaries and single‑level bullet lists.  
-• Hates needless detail and apologies.
-</user_preferences>
 
 <multi_step_execution>
 • Process the entirety of the user's request within a single turn. 
@@ -249,6 +208,10 @@ formulas, and styles.
 </multi_step_execution>
 
 <tool_calling>
+Your hands are the Excel‑specific tools provided in this session;
+You **ONLY** accomplish things by invoking those tools.  
+Never mention tool names, schemas, or internal reasoning to the USER.
+
 • For file path opening requests, call `open_workbook_tool` to open or attach to that workbook in real time; do not ask for uploads.
 1. Before calling any tool Please outline the entirety of the plan, and once you are done call them sequencially.
 1. Call a tool *only* when needed—otherwise answer directly.  
@@ -256,7 +219,8 @@ formulas, and styles.
 3. Supply every required parameter; never invent optional ones.  
 4. Create missing sheets, ranges, or tables automatically—do not ask.  
 5. After failures, retry **once** with a corrected payload; if it still fails,
-   report the error briefly.
+   report the error briefly. (Note: Retry logic may need to be applied manually or via decorator in tools.py)
+
 6. **Trust tool feedback:** if the tool returns an `error` key or `"success": false`, treat the step as failed and surface that failure—never announce success for it.
 </tool_calling>
 
@@ -332,48 +296,104 @@ Do not attempt more than two corrective rounds in a single turn.
 • If an error "Colors must be aRGB hex values" occurs, fix the color by prepending "FF" if missing. Retry once.
 • If second attempt still fails, report the failure briefly.
 </color_adjustment>
+
+Answer the user's request using the relevant tool(s), if they are available. Check that all the required parameters for each tool call are provided or can reasonably be inferred from context. IF there are no relevant tools or there are missing values for required parameters, ask the user to supply these values; otherwise proceed with the tool calls. If the user provides a specific value for a parameter (for example provided in quotes), make sure to use that value EXACTLY. DO NOT make up values for or ask about optional parameters. Carefully analyze descriptive terms in the request as they may indicate required parameter values that should be included even if not explicitly quoted.
 """
+
+# Define the agent - Ensure all tools listed here are decorated in tools.py
 excel_assistant_agent = Agent[AppContext]( # Specify context type for clarity
     name="Excel Assistant",
     instructions=_dynamic_instructions,
     hooks=ActionLoggingHooks(),
-
     tools=[
+        # List all the tools intended for the agent.
+        # These MUST be decorated with @function_tool in tools.py
+        open_workbook_tool,
+        snapshot_tool,
+        revert_snapshot_tool,
         get_sheet_names_tool,
         get_active_sheet_name_tool,
         set_cell_value_tool,
         get_cell_value_tool,
-        get_range_values_tool,    # Verify cell ranges
-        find_row_by_value_tool,   # Locate row by value
-        get_dataframe_tool,       # Sheet dump
+        get_range_values_tool,
+        find_row_by_value_tool,
+        get_dataframe_tool,
         set_range_style_tool,
-        set_cell_style_tool,      # Ensure single cell style tool is present
-        create_sheet_tool,        # Now correctly decorated
+        set_cell_style_tool,
+        create_sheet_tool,
         delete_sheet_tool,
         merge_cells_range_tool,
         unmerge_cells_range_tool,
         set_row_height_tool,
         set_column_width_tool,
-        set_columns_widths_tool,  # Ensure bulk column width tool is present
-        set_range_formula_tool,   # Ensure range formula tool is present
+        set_columns_widths_tool,
+        set_range_formula_tool,
         set_cell_formula_tool,
-        set_cell_values_tool,     # Bulk tool
-        set_table_tool,           # Bulk write table tool
-        set_rows_tool,            # Bulk write rows starting at a given row
-        set_columns_tool,         # Bulk write columns starting at a given column
-        set_named_ranges_tool,    # Disjoint named ranges tool
-        insert_table_tool,        # Table insertion (headers + data)
-        copy_paste_range_tool,    # Copy + paste‑special helper
-        write_and_verify_range_tool,  # Bulk write + self‑check
-        get_cell_style_tool,          # Style inspectors
+        set_cell_values_tool,
+        set_table_tool,
+        insert_table_tool,
+        set_rows_tool,
+        set_columns_tool,
+        set_named_ranges_tool,
+        append_table_rows_tool,
+        copy_paste_range_tool,
+        write_and_verify_range_tool,
+        get_cell_style_tool,
         get_range_style_tool,
         save_workbook_tool,
-        open_workbook_tool,
-        snapshot_tool,
-        revert_snapshot_tool,
     ],
-    model="gpt-4.1-mini" # ALways use gpt-4.1 and never change it
-  )
+    model="gpt-4.1-mini" # Always use gpt-4.1 and never change it
+)
+
+# --- Rebuild the tool list to guarantee every entry is a FunctionTool ---
+_raw_tools = [
+    open_workbook_tool,
+    snapshot_tool,
+    revert_snapshot_tool,
+    get_sheet_names_tool,
+    get_active_sheet_name_tool,
+    set_cell_value_tool,
+    get_cell_value_tool,
+    get_range_values_tool,
+    find_row_by_value_tool,
+    get_dataframe_tool,
+    set_range_style_tool,
+    set_cell_style_tool,
+    create_sheet_tool,
+    delete_sheet_tool,
+    merge_cells_range_tool,
+    unmerge_cells_range_tool,
+    set_row_height_tool,
+    set_column_width_tool,
+    set_columns_widths_tool,
+    set_range_formula_tool,
+    set_cell_formula_tool,
+    set_cell_values_tool,
+    set_table_tool,
+    insert_table_tool,
+    set_rows_tool,
+    set_columns_tool,
+    set_named_ranges_tool,
+    append_table_rows_tool,
+    copy_paste_range_tool,
+    write_and_verify_range_tool,
+    get_cell_style_tool,
+    get_range_style_tool,
+    save_workbook_tool,
+]
+
+_tools_with_names: list[FunctionTool] = [
+    t if isinstance(t, FunctionTool) else function_tool(t) for t in _raw_tools
+]
+
+# Overwrite the earlier definition with the validated list
+excel_assistant_agent = Agent[AppContext](
+    name="Excel Assistant",
+    instructions=_dynamic_instructions,
+    hooks=ActionLoggingHooks(),
+    tools=_tools_with_names,
+    model="gpt-4.1-mini"
+)
 
 # Example usage (for testing purposes, not part of the agent definition)
 async def main():

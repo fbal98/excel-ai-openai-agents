@@ -111,7 +111,7 @@ async def main() -> None:
     try:
         print("DEBUG: Initializing ExcelManager...")
         # Make manager visible by default, allow attaching
-        async with ExcelManager(file_path=args.input_file, visible=True, attach_existing=True) as excel_mgr:
+        async with ExcelManager(file_path=args.input_file, visible=True, attach_existing=True, single_workbook=True) as excel_mgr:
             print("DEBUG: ExcelManager initialized")
             ctx = AppContext(excel_manager=excel_mgr)
             print("DEBUG: AppContext initialized")
@@ -179,8 +179,17 @@ async def main() -> None:
                             if len(chat) > 8:
                                 chat = chat[-8:]
                             print(reply)
+                        except AttributeError as ae:
+                             # More specific logging for AttributeError
+                            logger.error(f"AttributeError during agent run: {ae}", exc_info=True)
+                            error_msg = f"Error processing your request: {ae}"
+                            print(error_msg)
+                            chat.append({"role": "assistant", "content": f"Sorry, I encountered an internal error (AttributeError): {ae}"})
+                            if len(chat) > 8:
+                                chat = chat[-8:]
                         except Exception as e:
-                            # Basic error reporting for interactive mode
+                            # Basic error reporting for other exceptions
+                            logger.error(f"Error during agent run: {e}", exc_info=True) # Add traceback logging
                             error_msg = f"Error processing your request: {e}"
                             print(error_msg)
                             # Add a placeholder response in chat history
