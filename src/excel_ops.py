@@ -523,13 +523,14 @@ class ExcelManager:
                 # Get headers (first row) - handle potential errors/empty rows
                 try:
                     # Fast path: fetch first row directly through COM to avoid many Range calls
-                    used_range = sheet.api.UsedRange
-                    # Bail out completely on extremely wide sheets (≫ token budget & very slow)
-                    if used_range.Columns.Count > 2000:
-                        logger.debug(f"Sheet '{sheet_name}': Skipping header scan — {used_range.Columns.Count} columns (>2000).")
-                        header_values = []
+                    used = sheet.used_range
+                    vals = used.value or []
+                    if isinstance(vals, list) and vals:
+                        header_values = vals[0]       # first row values
+                    elif vals is not None:
+                        header_values = [vals]        # single-cell sheet
                     else:
-                        header_values = used_range.Rows(1).Value2 or []
+                        header_values = []            # completely blank
                     if isinstance(header_values, list):
                         # Track the original length for logging
                         original_length = len(header_values)

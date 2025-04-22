@@ -1,4 +1,4 @@
-"""Command‑line interface for the Autonomous Excel Assistant (single realtime mode)."""
+"""Command‑line interface for the Autonomous Excel Assistant (single real‑time mode)."""
 
 from __future__ import annotations
 
@@ -6,254 +6,504 @@ import argparse
 import asyncio
 import logging
 import os
-import re
 import sys
 import time
-from typing import Any, Optional
-import uuid
+from collections import deque
+from typing import Optional, List, Dict
 
 from dotenv import load_dotenv
-from agents import Runner, ItemHelpers, trace
+from agents import Runner, ItemHelpers
 from agents.stream_events import RunItemStreamEvent
 from openai.types.responses import ResponseTextDeltaEvent
 
+# ──────────────────────────────
+#  Rich power‑ups (colour, panels, prompts …)
+# ──────────────────────────────
+from rich.console import Console, Group
+from rich.layout import Layout
+from rich.logging import RichHandler
+
+# ------------------------------------------------------------------
+# Stop log "echo” to stderr; only warnings+ should bypass Live panel
+# ------------------------------------------------------------------
+RichHandler.level = logging.WARNING
+from rich.panel import Panel
+from rich.prompt import Prompt
+from rich.live import Live
+import threading, queue, getchlib
+
+# ------------------------------------------------------------------
+# 1. Global helpers for the real‑time input buffer
+# ------------------------------------------------------------------
+_KEY_QUEUE: "queue.Queue[str]" = queue.Queue()
+
+class _InputBuffer:
+    """Holds the text the user is currently typing."""
+    def __init__(self) -> None:
+        self._chars: list[str] = []
+        self.lock = threading.Lock()
+
+    def append(self, ch: str) -> None:
+        with self.lock:
+            self._chars.append(ch)
+
+    def backspace(self) -> None:
+        with self.lock:
+            if self._chars:
+                self._chars.pop()
+
+    def clear(self) -> str:
+        with self.lock:
+            out = "".join(self._chars)
+            self._chars.clear()
+            return out
+
+    def __str__(self) -> str:
+        with self.lock:
+            return "".join(self._chars)
+
+_input_buffer = _InputBuffer()
+
+# ------------------------------------------------------------------
+# 2. Background thread that reads one key at a time
+# ------------------------------------------------------------------
+def _keyboard_loop(render_input_cb, live) -> None:
+    while True:
+        # Read a key *without* echoing it to the terminal. When echo is enabled,
+        # the character is briefly printed outside the Live layout and then
+        # cleared on each refresh, which made the input appear to "disappear”.
+        ch = getchlib.getkey(echo=False)
+        if ch in ("\x03", "\x04"):          # Ctrl‑C / Ctrl‑D – exit app
+            _KEY_QUEUE.put_nowait("__EXIT__")
+            break
+        if ch in ("\r", "\n"):              # ENTER – submit current buffer
+            _KEY_QUEUE.put_nowait(_input_buffer.clear())
+        elif ch in ("\x7f", "\b"):          # Backspace
+            _input_buffer.backspace()
+        elif ch.isprintable():
+            _input_buffer.append(ch)
+
+        # Re‑paint the input panel *immediately* from any thread
+        # Pass the latest buffer contents explicitly to avoid stale snapshots.
+        # ──────────────────────────────────────────────────────────────
+        # Rich ≥ 13.4 ships `Console.call_from_thread`, which safely queues a
+        # draw‑call onto the main render loop.  On older Rich versions the
+        # attribute is missing → calling it raises `AttributeError` inside this
+        # background thread, killing the thread and causing the user's typed
+        # characters to "disappear”.  We therefore:
+        #   1. Prefer the modern helper when present.
+        #   2. Gracefully fall back to calling the renderer directly when absent.
+        # Because `_keyboard_loop` already executes off the main thread, the
+        # direct call is safe and keeps the input panel responsive.
+        # ──────────────────────────────────────────────────────────────
+        try:
+            live.console.call_from_thread(render_input_cb, str(_input_buffer))
+        except AttributeError:
+            # Fallback path for Rich < 13.4
+            render_input_cb(str(_input_buffer))
+from rich.text import Text
+
+# ──────────────────────────────
+#  Project imports
+# ──────────────────────────────
 from .agent_core import excel_assistant_agent
 from .context import AppContext
 from .excel_ops import ExcelManager
 
 
+console = Console(highlight=False)
+
 # ──────────────────────────────
 #  Argument parsing
 # ──────────────────────────────
 def parse_args() -> argparse.Namespace:
-    p = argparse.ArgumentParser(description="Autonomous Excel Assistant (realtime)")
+    p = argparse.ArgumentParser(description="Autonomous Excel Assistant (real‑time)")
     p.add_argument("--input-file", type=str, help="Path to an existing workbook.")
     p.add_argument("--output-file", type=str, help="Path to save at the end (optional).")
-    p.add_argument("--instruction", type=str, default=None, help="Instruction for the agent.")
+    p.add_argument("--instruction", type=str, help="One‑shot instruction for the agent.")
     p.add_argument("--interactive", "-i", action="store_true", help="Interactive chat mode.")
     p.add_argument("--stream", action="store_true", help="Stream the agent's reasoning/output.")
-    p.add_argument("-v", "--verbose", action="store_true", help="Verbose logging.")
+    p.add_argument("-v", "--verbose", action="store_true", help="Verbose (DEBUG) logging.")
     p.add_argument("--trace-off", action="store_true", help="Disable OpenAI tracing for this run.")
     return p.parse_args()
 
 
 # ──────────────────────────────
-#  Streaming helper
+#  Layout-based logging handler
+# ──────────────────────────────
+class LiveLogHandler(logging.Handler):
+    """
+    Custom handler that keeps a rolling log in memory
+    and displays it in a fixed top panel of the Layout.
+    """
+
+    def __init__(self, live: Live, layout: Layout, max_records: int = 100) -> None:
+        super().__init__()
+        self.records = deque(maxlen=max_records)
+        self.live = live
+        self.layout = layout
+
+    def emit(self, record: logging.LogRecord) -> None:
+        # Keep only INFO / DEBUG in the top panel; warnings+ will go to console
+        if record.levelno > logging.INFO:
+            return
+
+        msg = self.format(record)
+        level_style = {
+            logging.DEBUG: "dim cyan",
+            logging.INFO: "green",
+        }.get(record.levelno, "white")
+
+        # De‑dupe consecutive identical INFO/DEBUG lines
+        if not self.records or self.records[-1].plain != msg:
+            self.records.append(Text(msg, style=level_style))
+
+        # Update the "logs" layout panel
+        def _refresh() -> None:
+            self.layout["logs"].update(
+                Panel(
+                    Text("\n").join(self.records),
+                    title="Logs",
+                    border_style="blue",
+                    padding=(0, 1),
+                    height=8,
+                )
+            )
+            self.live.update(self.layout, refresh=True)
+
+        # Attempt a thread-safe call if supported
+        try:
+            self.live.console.call_from_thread(_refresh)
+        except AttributeError:
+            _refresh()
+
+    def close(self) -> None:
+        try:
+            # Final update before stopping
+            self.layout["logs"].update(
+                Panel(
+                    Text("\n").join(self.records),
+                    title="Logs",
+                    border_style="blue",
+                    padding=(0, 1),
+                    height=8,
+                )
+            )
+            self.live.update(self.layout, refresh=True)
+            self.live.stop()
+        except Exception:
+            pass
+        super().close()
+
+
+# ──────────────────────────────
+#  Stream helper
 # ──────────────────────────────
 async def handle_streaming(result, verbose: bool):
     """
-    Consume a RunResultStreaming, display live progress, and
-    return an object with `.final_output`.
+    Pretty‑print streaming events if requested. In non‑interactive,
+    we show the agent's final output or incremental tokens.
     """
     logger = logging.getLogger(__name__)
-    final_output: str = ""
-    last_message: Optional[str] = None
+    final_output = ""
+    last_msg: Optional[str] = None
 
     try:
         async for event in result.stream_events():
-            # Raw token‑level deltas
-            if event.type == "raw_response_event" and isinstance(event.data, ResponseTextDeltaEvent):
-                delta: str = event.data.delta
+            # Raw LLM deltas
+            if (
+                event.type == "raw_response_event"
+                and isinstance(event.data, ResponseTextDeltaEvent)
+            ):
+                delta = event.data.delta
                 final_output += delta
-                if last_message is None:
-                    # Keep a rolling copy so non‑verbose runs still get the full text
-                    last_message = final_output
+                if last_msg is None:
+                    last_msg = final_output
                 if verbose:
-                    print(delta, end="", flush=True)
+                    console.print(delta, end="")
                 continue
 
+            # Detailed events from the agent
             if event.type != "run_item_stream_event":
                 continue
 
-            item = event.item  # type: RunItemStreamEvent
-            if item.type == "tool_call_item":
-                if verbose:
-                    print(f"🛠️  {item.function_name}")
-            elif item.type == "tool_call_output_item":
-                if verbose:
-                    ok = "✔" if "error" not in item.output else "✖"
-                    print(f"   ↳ {ok} {item.output}")
+            item: RunItemStreamEvent = event.item
+            if item.type == "tool_call_item" and verbose:
+                console.print(f"[cyan]🛠️  {item.function_name}[/]")
+            elif item.type == "tool_call_output_item" and verbose:
+                ok = "✔" if "error" not in item.output else "✖"
+                colour = "green" if ok == "✔" else "red"
+                console.print(f"   ↳ [{colour}]{ok} {item.output}[/{colour}]")
             elif item.type == "message_output_item":
-                msg_text = ItemHelpers.text_message_output(item)
-                last_message = msg_text
+                text = ItemHelpers.text_message_output(item)
+                last_msg = text
                 if verbose:
-                    print(f"💬 {msg_text}")
-    except Exception as e:
-        logger.error("Streaming error: %s", e)
+                    console.print(f"[magenta]💬 {text}[/]")
+    except Exception as e:  # pragma: no cover
+        logger.error("Streaming error: %s", e, exc_info=True)
         final_output += f"\n\n[Streaming error: {e}]"
 
     class _Result:
-        def __init__(self, text: str):  # noqa: D401
+        def __init__(self, text: str):
             self.final_output = text
 
-    return _Result(last_message or final_output)
+    return _Result(last_msg or final_output)
 
 
 # ──────────────────────────────
-#  Main entry
+#  Main
 # ──────────────────────────────
 async def main() -> None:
-    print("DEBUG: Starting main()")
     load_dotenv()
-    print("DEBUG: load_dotenv() called")
     if not os.getenv("OPENAI_API_KEY"):
-        print("DEBUG: OPENAI_API_KEY not found, raising error")
-        raise RuntimeError("OPENAI_API_KEY not set.")
-    print("DEBUG: OPENAI_API_KEY found")
+        console.print("[bold red]❌ OPENAI_API_KEY not set – aborting.[/]")
+        sys.exit(1)
 
     args = parse_args()
-    print(f"DEBUG: Args parsed: {args}")
-    logging.basicConfig(level=logging.DEBUG if args.verbose else logging.INFO, format="%(message)s")
+
+    # Build a Layout with top logs (fixed height) & bottom chat
+    layout = Layout(name="root")
+    # Top → Logs (fixed), middle → Chat (flex), bottom → Input (fixed)
+    layout.split_column(
+        Layout(name="logs", size=8),
+        Layout(name="chat", ratio=1),
+        Layout(name="input", size=3),
+    )
+
+    # Start a Live display with our layout (alternate screen avoids flicker)
+    live = Live(
+        layout,
+        console=console,
+        refresh_per_second=10,
+        screen=True,
+        redirect_stdout=False,   # don’t let prints escape the layout
+    )
+    live.__enter__()  # We'll manually manage the context
+
+    # Build a logging handler to feed the top panel
+    live_handler = LiveLogHandler(live=live, layout=layout)
+    rich_handler = RichHandler(rich_tracebacks=True, console=console, markup=True)
+    # Only show WARNING+ in the scrolling console
+    rich_handler.setLevel(logging.WARNING)
+
+    # Remove *all* pre‑existing handlers to avoid duplicates, then install ours
+    root = logging.getLogger()
+    root.handlers.clear()
+    logging.basicConfig(
+        level=logging.DEBUG if args.verbose else logging.INFO,
+        format="%(message)s",
+        handlers=[live_handler, rich_handler],
+        force=True,        # Python 3.13+; on 3.11/3.12 we did .handlers.clear()
+    )
     logger = logging.getLogger(__name__)
-    print("DEBUG: Logging configured")
 
-    # Use async context manager for ExcelManager to ensure proper resource management
+    if args.verbose:
+        logger.debug("Verbose logging enabled (DEBUG level).")
+
+    # We'll store chat messages in a list for the bottom panel
+    chat_history: List[Dict[str, str]] = []
+
+    def render_chat_panel() -> None:
+        """
+        Update the 'chat' panel in the layout.
+
+        Each utterance is rendered in its own bordered Panel titled
+        "You” or "Assistant”, stacked vertically so the interface resembles
+        a classic chat transcript while the Logs panel remains fixed above.
+        """
+        message_panels: List[Panel] = []
+        for msg in chat_history:
+            role = msg.get("role", "system")
+            text = msg.get("content", "")
+
+            if role == "user":
+                panel = Panel(
+                    Text(text),
+                    title="You",
+                    border_style="cyan",
+                    padding=(0, 1),
+                )
+            elif role == "assistant":
+                panel = Panel(
+                    Text(text),
+                    title="Assistant",
+                    border_style="magenta",
+                    padding=(0, 1),
+                )
+            else:  # e.g. system or other roles
+                panel = Panel(
+                    Text(text),
+                    title=role.capitalize(),
+                    border_style="grey58",
+                    padding=(0, 1),
+                )
+
+            message_panels.append(panel)
+
+        # Keep only the most recent 50 messages to avoid unbounded growth
+        message_panels = message_panels[-50:]
+
+        # Stack the panels in the chat area
+        layout["chat"].update(Group(*message_panels))
+        live.update(layout, refresh=True)
+
+    # new input panel render helper
+    def render_input_panel(content: str = "") -> None:
+        """
+        Keep the user's current input visible *inside* the layout.
+        """
+        layout["input"].update(
+            Panel(
+                Text(content if content else " ", overflow="fold"),
+                title="You",
+                border_style="cyan",
+                padding=(0, 1),
+            )
+        )
+        live.update(layout, refresh=True)
+
+    # ───────── Excel session ─────────
     try:
-        print("DEBUG: Initializing ExcelManager...")
-        # Make manager visible by default, allow attaching
-        async with ExcelManager(file_path=args.input_file, visible=True, attach_existing=True, single_workbook=True) as excel_mgr:
-            print("DEBUG: ExcelManager initialized")
+        async with ExcelManager(
+            file_path=args.input_file,
+            visible=True,
+            attach_existing=True,
+            single_workbook=True,
+        ) as excel_mgr:
             ctx = AppContext(excel_manager=excel_mgr)
-            print("DEBUG: AppContext initialized")
-
-            # Initial workbook‑shape scan
-            if ctx.update_shape():
-                logger.debug("Initial workbook shape scanned (v%s).", ctx.shape.version)
-            else:
-                logger.warning("Initial workbook shape scan failed; proceeding without shape info.")
+            ctx.update_shape()  # first shape scan
 
             if args.input_file:
-                logger.info("📂 Opened workbook: %s", args.input_file)
+                console.print(f"📂 Opened workbook: [bold]{args.input_file}[/]")
             else:
-                logger.info("🆕 Started new workbook.")
+                console.print("🆕 Started new workbook.")
 
-            # ────────── Interactive mode ──────────
-            print(f"DEBUG: Checking interactive mode (args.interactive={args.interactive})")
+            # ============ INTERACTIVE ============
             if args.interactive:
-                print("DEBUG: Entering interactive mode block")
-                chat: list[dict[str, str]] = []
-                print("Hello! How can I help you today?")
-                print("(Enter your message, use multiple lines if needed. Submit with an empty line)")
+                chat_history.append(
+                    {
+                        "role": "assistant",
+                        "content": "Hello! How can I help you today?",
+                    }
+                )
+                render_chat_panel()
+                render_input_panel("")   # clear input box
+                render_input_panel("")  # seed empty input box
+                console.print(
+                    "(Type your question. Blank line to submit. 'exit' to quit.)"
+                )
+
+                # --- NEW real‑time input loop --------------------
+                kb_thread = threading.Thread(target=_keyboard_loop, args=(render_input_panel, live), daemon=True)
+                kb_thread.start()
+
                 while True:
                     try:
-                        print("DEBUG: Waiting for multi-line input...")
-                        lines = []
-                        while True:
-                            line = input("> " if not lines else "... ")  # Different prompt for continuation lines
-                            if not line:
-                                break
-                            lines.append(line)
-                        user = "\n".join(lines)
-                        print(f"DEBUG: Received multi-line input: {user}")
-                        
-                        if not user:  # Skip if only empty line was entered
+                        # Block until ENTER or Ctrl‑D / Ctrl‑C
+                        user_msg = _KEY_QUEUE.get()
+                        if user_msg == "__EXIT__":
+                            console.print("\n[bold red]Good‑bye 👋[/]")
+                            return
+                        if not user_msg.strip():
+                            render_input_panel("")   # clear input box
                             continue
-                            
-                        if user.lower() in {"exit", "quit"}:
+                        if user_msg.lower() in {"exit", "quit"}:
                             break
-                            
-                        chat.append({"role": "user", "content": user})
-                        print("DEBUG: Calling Runner.run...")
-                        try:
-                            # Always call directly, bypassing the trace context manager
-                            res = await Runner.run(
-                                excel_assistant_agent,
-                                input=chat,
-                                context=ctx,
-                                max_turns=25,
-                                # trace_id=str(uuid.uuid4()) # Trace ID not needed if not tracing
-                            )
-                            print("DEBUG: Runner.run completed")
-                            
-                            # Ensure all Excel changes are applied before giving feedback to the user
-                            try:
-                                print("DEBUG: Ensuring Excel changes are applied...")
-                                await excel_mgr.ensure_changes_applied()
-                                print("DEBUG: Excel changes applied.")
-                            except Exception as e:
-                                print(f"DEBUG: Error ensuring Excel changes: {e}")
-                            
-                            reply = res.final_output
-                            chat.append({"role": "assistant", "content": reply})
-                            # ---- Buffer‑window memory: keep last 4 user‑assistant pairs ----
-                            if len(chat) > 8:
-                                chat = chat[-8:]
-                            print(reply)
-                        except AttributeError as ae:
-                             # More specific logging for AttributeError
-                            logger.error(f"AttributeError during agent run: {ae}", exc_info=True)
-                            error_msg = f"Error processing your request: {ae}"
-                            print(error_msg)
-                            chat.append({"role": "assistant", "content": f"Sorry, I encountered an internal error (AttributeError): {ae}"})
-                            if len(chat) > 8:
-                                chat = chat[-8:]
-                        except Exception as e:
-                            # Basic error reporting for other exceptions
-                            logger.error(f"Error during agent run: {e}", exc_info=True) # Add traceback logging
-                            error_msg = f"Error processing your request: {e}"
-                            print(error_msg)
-                            # Add a placeholder response in chat history
-                            chat.append({"role": "assistant", "content": f"Sorry, I encountered an error: {e}"})
-                            if len(chat) > 8:
-                                chat = chat[-8:]
-                    except (EOFError, KeyboardInterrupt):
-                        print("\nExiting.")
+
+                        # Add user's message
+                        chat_history.append({"role": "user", "content": user_msg})
+                        render_chat_panel()
+                        render_input_panel("")  # reset input box
+
+                        # Invoke the agent
+                        res = await Runner.run(
+                            excel_assistant_agent,
+                            input=user_msg,
+                            context=ctx,
+                            max_turns=25,
+                        )
+                        await excel_mgr.ensure_changes_applied()
+                        reply = res.final_output
+
+                        # Add agent's answer
+                        chat_history.append({"role": "assistant", "content": reply})
+                        render_chat_panel()
+
+                    except (KeyboardInterrupt, EOFError):
+                        console.print("\n[bold red]Good‑bye 👋[/]")
                         break
-                print("DEBUG: Exiting interactive loop")
+                    except Exception as e:
+                        logger.error("Error during agent run: %s", e, exc_info=True)
+                        console.print(f"[bold red]Error:[/] {e}")
+
                 return
 
-            # ────────── One‑shot / scripted mode ──────────
-            print("DEBUG: Entering one-shot mode block")
-            logger.info(f"\n💡 Instruction: {args.instruction}")
+            # ============ ONE-SHOT ============
+            if not args.instruction:
+                console.print(
+                    "[bold red]⚠ No instruction provided. Use --instruction or -i for interactive mode.[/]"
+                )
+                sys.exit(1)
+
+            logger.info("💡 Instruction: %s", args.instruction)
             start = time.monotonic()
+
+            # Add the user instruction to chat panel for clarity
+            chat_history.append({"role": "user", "content": args.instruction})
+            render_chat_panel()
+
             try:
                 if args.stream:
-                    # Always call directly, bypassing the trace context manager
                     streamed = await Runner.run_streamed(
                         excel_assistant_agent,
                         input=args.instruction,
                         context=ctx,
                         max_turns=25,
-                        # trace_id=str(uuid.uuid4()) # Trace ID not needed if not tracing
                     )
                     result = await handle_streaming(streamed, args.verbose)
                 else:
-                    # Always call directly, bypassing the trace context manager
                     result = await Runner.run(
                         excel_assistant_agent,
                         input=args.instruction,
                         context=ctx,
                         max_turns=25,
-                        # trace_id=str(uuid.uuid4()) # Trace ID not needed if not tracing
                     )
             except Exception as e:
-                # Basic error reporting for one-shot mode
-                logger.error(f"❌ Agent error: {e}")
+                logger.error("❌ Agent error: %s", e, exc_info=True)
                 sys.exit(1)
-            elapsed = time.monotonic() - start
-            logger.info(f"✅ Done in {elapsed:.1f}s\n\n📤 {result.final_output}\n")
 
-            # ────────── Optional explicit save ──────────
+            await excel_mgr.ensure_changes_applied()
+            reply = result.final_output
+            elapsed = time.monotonic() - start
+
+            logger.info("Done in %.1fs", elapsed)
+
+            # Show final output in chat
+            chat_history.append({"role": "assistant", "content": reply})
+            render_chat_panel()
+
+            # ---------- Optional save ----------
             if args.output_file:
                 try:
-                    await excel_mgr.ensure_changes_applied()
-                    saved_path = await excel_mgr.save_with_confirmation(args.output_file)
-                    logger.info("💾 Workbook saved to %s", saved_path)
+                    saved = await excel_mgr.save_with_confirmation(args.output_file)
+                    console.print(f"[bold green]💾 Workbook saved to {saved}[/]")
                 except Exception as e:
-                    logger.error("❌ Failed to save workbook: %s", e)
-                    try:
-                        saved_path = await excel_mgr.save_with_confirmation()
-                        logger.info("💾 Workbook saved to fallback location: %s", saved_path)
-                    except Exception:
-                        logger.error("All save attempts failed.")
-    except Exception as e:
-        logger.error("❌ Fatal error: %s", e)
+                    logger.error("Failed to save workbook: %s", e, exc_info=True)
+                    console.print(f"[bold red]❌ Save failed:[/] {e}")
+
+    except Exception as e:  # pragma: no cover
+        logger.error("Fatal error: %s", e, exc_info=True)
+        console.print(f"[bold red]❌ Fatal error:[/] {e}")
         sys.exit(1)
+    finally:
+        # Stop live logging
+        live_handler.close()
+        live.__exit__(None, None, None)
 
 
 if __name__ == "__main__":
     try:
         asyncio.run(main())
     except KeyboardInterrupt:
-        print("\nExiting.")
+        console.print("\nExiting.")
         sys.exit(0)
