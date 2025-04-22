@@ -29,3 +29,4 @@ node_modules/
 tasks.json
 tasks/ 
 venv/
+state_dump.json
