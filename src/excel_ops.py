@@ -221,9 +221,13 @@ class ExcelManager:
             else:
                 # ── If we created a new Excel instance and the caller didn’t ask
                 #    for a specific file, Excel may already have opened Book1.
-                if self.app.books:                           # ← NEW guard
-                    self.book = self.app.books[0]            # ← reuse Book1
-                    logger.info("Re‑using default workbook %s", self.book.name)
+                #    Using len(...) avoids a truthiness quirk in xlwings on macOS.
+                if len(self.app.books) > 0:                  # reuse default workbook
+                    try:
+                        self.book = self.app.books.active    # prefer the active workbook
+                    except Exception:
+                        self.book = self.app.books[0]        # fall back to first workbook
+                    logger.info("Re‑using default workbook %s", getattr(self.book, "name", "unknown"))
                 else:                                        # Excel really is empty
                     logger.info("Adding new blank workbook to new instance…")
                     self.book = self.app.books.add()
@@ -245,10 +249,21 @@ class ExcelManager:
                 extra_count = 0
                 for wb in list(self.app.books):
                     if wb != self.book:
-                        wb.close()
-                        extra_count += 1
+                        try:
+                            wb.close()
+                            extra_count += 1
+                        except Exception as e:
+                            logger.warning("Could not close extra workbook: %s", e)
                 if extra_count > 0:
                     logger.info("Closed %d extra workbook(s). Only one workbook remains.", extra_count)
+                    # Ensure our handle is still valid after closing others
+                    try:
+                        self.book = self.app.books.active
+                    except Exception:
+                        try:
+                            self.book = self.app.books[0]
+                        except Exception:
+                            logger.warning("Could not refresh managed workbook handle after cleanup.")
         else:
             # This case should ideally not happen if the logic above is correct
             raise RuntimeError("Failed to obtain a workbook handle within ExcelManager.__aenter__.")
