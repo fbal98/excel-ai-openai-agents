@@ -395,6 +395,25 @@ excel_assistant_agent = Agent[AppContext](
     model="gpt-4.1-mini"
 )
 
+from .costs import dollars_for_usage
+from agents import Runner, Agent, Usage
+from typing import Tuple, Any
+
+async def run_and_cost(
+    agent: Agent,
+    *,
+    input: str,
+    context,
+    **kw,
+) -> Tuple[Any, Usage, float]:
+    """
+    Convenience helper for library users who need cost in one call.
+    Returns (result, usage, dollars).
+    """
+    res = await Runner.run(agent, input=input, context=context, **kw)
+    usage = context.usage
+    return res, usage, dollars_for_usage(usage, agent.model)
+
 # Example usage (for testing purposes, not part of the agent definition)
 async def main():
     print("Excel AI Assistant agent is ready. (Run via CLI)")

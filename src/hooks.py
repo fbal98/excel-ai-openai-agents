@@ -7,10 +7,11 @@ from __future__ import annotations
 import logging
 from typing import Any, Dict, Optional
 
-from agents import Agent, AgentHooks, RunContextWrapper, Tool, FunctionTool
+from agents import Agent, AgentHooks, RunContextWrapper, Tool, FunctionTool, Usage
 
 from .constants import WRITE_TOOLS
 from .debounce_constants import SHAPE_SCAN_EVERY_N_WRITES, STRUCTURAL_WRITE_TOOLS, MAX_CONSECUTIVE_ERRORS
+from .costs import dollars_for_usage
 from .context import AppContext # WorkbookShape is implicitly available via AppContext
 
 logger = logging.getLogger(__name__)
@@ -93,6 +94,40 @@ class ActionLoggingHooks(SummaryHooks):
     Each tool call is logged with success/failure so the agent can
     see its recent behaviour. Also handles debounced workbook shape refresh.
     """
+
+    # ------------------------------------------------------------------
+    #  Helper: pretty-print usage for logs
+    # ------------------------------------------------------------------
+    def _usage_to_str(self, usage: "Usage") -> str:
+        return (
+            f"{usage.requests} requests, "
+            f"{usage.input_tokens} input tokens, "
+            f"{usage.output_tokens} output tokens, "
+            f"{usage.total_tokens} total tokens"
+        )
+
+    # ------------------------------------------------------------------
+    #  New hook: run-level cost logging & persistence
+    # ------------------------------------------------------------------
+    async def on_agent_end(
+        self,
+        context: RunContextWrapper["AppContext"],
+        agent: Agent,
+        output: Any,
+    ) -> None:
+        """Compute cost and persist per-run stats."""
+        # 1. Preserve parent behaviour (currently a no-op but future-proof)
+        await super().on_agent_end(context, agent, output)  # no-op today
+
+        usage = context.usage               # SDK guarantees this object exists
+        cost  = dollars_for_usage(usage, agent.model)
+
+        logger.info("💲 %.4f USD | %s", cost, self._usage_to_str(usage))
+
+        # Persist for other layers (CLI, dashboards, tests)
+        ctx_state = context.context.state
+        ctx_state["last_run_usage"] = usage.model_dump()   # pydantic helper
+        ctx_state["last_run_cost"]  = cost
 
     async def on_tool_start(
         self,
