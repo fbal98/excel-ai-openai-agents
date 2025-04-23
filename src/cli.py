@@ -367,9 +367,9 @@ async def main() -> None:
         u    = ctx.state.get("last_run_usage", {})
         cost = ctx.state.get("last_run_cost", 0.0)
         body = (
-            f"Tokens: {u.get('total_tokens',0)} "
-            f\"(in={u.get('input_tokens',0)}, out={u.get('output_tokens',0)})\\n\"
-            f\"Cost:   ${cost:,.4f}\"
+                        f"""Tokens: {u.get('total_tokens',0)} 
+            (in={u.get('input_tokens',0)}, out={u.get('output_tokens',0)})
+            Cost:   ${cost:,.4f}"""
         )
         layout["stats"].update(
             Panel(Text(body), title="Stats", border_style="yellow", padding=(0,1))
