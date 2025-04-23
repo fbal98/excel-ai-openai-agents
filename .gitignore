@@ -29,5 +29,6 @@ node_modules/
 tasks.json
 tasks/ 
 venv/
+.venv
 state_dump.json
 state_dump.json

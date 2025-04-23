@@ -1,6 +1,8 @@
-# CLAUDE.md - Project Guide (Excel AI Agent)
+# CLAUDE.md
 
-Quick reference for working on the `excel-ai-openai-agents` project.
+This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
+
+# Excel AI Agent - Project Guide
 
 ## Goal
 
@@ -26,44 +28,25 @@ AI agent using `xlwings` to modify Excel workbooks based on natural language. Fe
 
 ## Coding Guidelines
 
-* **Style**: Standard Python style (snake_case, CamelCase, UPPER_CASE). Max 100 chars/line.
-* **Types**: Full type annotations required (`typing`).
-* **Docs**: Docstrings for public APIs.
-* **Errors**: Use `try/except`, `logging`, and specific tool error returns (see below).
-* **Logging**: Standard `logging`. TUI uses `UILogHandler`.
+* **Style**: Standard Python style. Max 100 chars/line. Group imports: stdlib → third-party → local.
+* **Naming**: snake_case (functions), CamelCase (classes), UPPER_CASE (constants). Tools must end with `_tool`.
+* **Types**: Full type annotations required (`typing`). Return `ToolResult` TypedDict from tools.
+* **Errors**: Early validation with descriptive errors. Return `{"success": False, "error": "Reason"}` from tools.
+* **Docs**: Google-style docstrings for public APIs. Triple double-quotes.
 
 ## Tool Development (`src/tools.py`)
 
-* **Naming**: Must end with `_tool`.
-* **Decorator**: Must use `@function_tool`.
 * **Signature**: `def my_tool(ctx: RunContextWrapper[AppContext], arg1: type, ...) -> ToolResult:`
-    * Access context: `ctx.context` (`AppContext`)
-    * Access Excel: `ctx.context.excel_manager`
-* **Return**: Must conform to `ToolResult` (`TypedDict` from `tools.py`):
-    * **Success**: `{"success": True}` or `{"success": True, "data": ...}`
-    * **Failure**: `{"success": False, "error": "Reason"}`
-    * `_ensure_toolresult` helper normalizes simpler returns (like `True`, `None`, `dict` with just `"error"`).
-* **Interaction**: Use `ctx.context.excel_manager` methods for Excel actions.
+* **Return**: `{"success": True}` or `{"success": True, "data": ...}` for success, `{"success": False, "error": "Reason"}` for failure.
 * **Validation**: Validate inputs early, return error dict on failure.
 * **Bulk Ops**: Prefer bulk tools (`set_cell_values`, `insert_table`) over loops.
 
 ## State & Context (`src/context.py`)
 
-* `AppContext`: Central object passed around. Holds `ExcelManager`, `state` dict, `shape` (`WorkbookShape`), `actions` list, `metrics`.
+* `AppContext`: Central object passed around. Holds `ExcelManager`, `state` dict, `shape`, `actions`, `metrics`.
 * `WorkbookShape`: Summary of sheets, headers, names. Fed into agent prompt.
-* **Shape Updates**: Managed by `hooks.py` (`ActionLoggingHooks`). Triggered by `WRITE_TOOLS` / `STRUCTURAL_WRITE_TOOLS`, debounced.
+* **Shape Updates**: Managed by `hooks.py`, triggered by write tools, debounced.
 
-## Excel Interaction (`src/excel_ops.py`)
+## Known Issues & Solutions
 
-* `ExcelManager`: Handles all `xlwings` interaction. Use its methods inside tools.
-* Supports snapshots & revert. Async context manager (`__aenter__`, `__aexit__`).
-
-## Prompting (`src/agent_core.py`)
-
-* `SYSTEM_PROMPT`: Defines agent behavior, tool usage rules.
-* `_dynamic_instructions`: Adds current `<workbook_shape>` and `<progress_summary>` to the prompt.
-
-## UI (`src/ui/`)
-
-* Built with `prompt_toolkit` and `rich`.
-* Key files: `app.py` (layout/app logic), `log_handler.py` (TUI logging), `renderers.py` (message styling).
+* **Excel Workbook Comparison**: In `ExcelManager.__aenter__` (`excel_ops.py`), never compare workbook objects directly (`wb != self.book`). Instead, compare workbook names to avoid "Object does not exist" errors (macOS). Always check `len(app.books)` before accessing any workbook. This prevents OSERROR -1728.

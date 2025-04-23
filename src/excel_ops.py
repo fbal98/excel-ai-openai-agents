@@ -247,23 +247,37 @@ class ExcelManager:
             # If single_workbook is True, close all other workbooks
             if self._single_workbook:
                 extra_count = 0
+                # Create a list of workbook names to close (safer than comparing workbook objects)
+                book_name = self.book.name
                 for wb in list(self.app.books):
-                    if wb != self.book:
-                        try:
-                            wb.close()
-                            extra_count += 1
-                        except Exception as e:
-                            logger.warning("Could not close extra workbook: %s", e)
+                    try:
+                        wb_name = wb.name
+                        if wb_name != book_name:
+                            try:
+                                wb.close()
+                                extra_count += 1
+                            except Exception as e:
+                                logger.warning("Could not close extra workbook: %s", e)
+                    except Exception as e:
+                        logger.warning(f"Could not get workbook name: {e}")
+                        continue
+                        
                 if extra_count > 0:
                     logger.info("Closed %d extra workbook(s). Only one workbook remains.", extra_count)
                     # Ensure our handle is still valid after closing others
                     try:
-                        self.book = self.app.books.active
-                    except Exception:
-                        try:
-                            self.book = self.app.books[0]
-                        except Exception:
-                            logger.warning("Could not refresh managed workbook handle after cleanup.")
+                        if len(self.app.books) > 0:
+                            try:
+                                self.book = self.app.books.active
+                            except Exception:
+                                if len(self.app.books) > 0:
+                                    self.book = self.app.books[0]
+                                else:
+                                    logger.warning("No workbooks available after cleanup.")
+                        else:
+                            logger.warning("No workbooks available after cleanup.")
+                    except Exception as e:
+                        logger.warning(f"Could not refresh workbook handle after cleanup: {e}")
         else:
             # This case should ideally not happen if the logic above is correct
             raise RuntimeError("Failed to obtain a workbook handle within ExcelManager.__aenter__.")
