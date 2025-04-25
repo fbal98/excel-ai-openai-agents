@@ -139,10 +139,13 @@ async def run_agent_streamed(agent: Agent, user_input: str, ctx: AppContext):
     Runs the agent using Runner.run_streamed and renders events live.
     Handles the spinner and event formatting using stream_renderer.py.
     Displays cost information after the run if enabled.
+    
+    Returns:
+        The RunResultStreaming object for conversation history persistence
     """
     if not ctx.excel_manager or not ctx.excel_manager.book:
         print("\n\033[93m⚠️ No active workbook. Use ':open <path>' or ':new' first.\033[0m")
-        return
+        return None
 
     thinking_task = None
     spinner_prefix = f"🤖 {get_active_provider().capitalize()} Thinking" # Show current provider
@@ -153,18 +156,45 @@ async def run_agent_streamed(agent: Agent, user_input: str, ctx: AppContext):
     logger.info(f"Input: '{user_input}'")
     logger.info(f"Context State BEFORE run: {ctx.state}")
     logger.info(f"Context Shape BEFORE run: v{ctx.shape.version if ctx.shape else 'N/A'}")
-    # Log last few actions if needed: logger.info(f"Context Actions BEFORE run: {ctx.actions[-3:]}")
-
-    logger.info(f"--- Running Agent ---")
-    logger.info(f"Input: '{user_input}'")
-    logger.info(f"Context State BEFORE run: {ctx.state}")
-    logger.info(f"Context Shape BEFORE run: v{ctx.shape.version if ctx.shape else 'N/A'}")
-    # Log last few actions if needed: logger.info(f"Context Actions BEFORE run: {ctx.actions[-3:]}")
+    
+    # Check if we need to use previous conversation history
+    # Ensure user_input is properly formatted as a chat message
+    if isinstance(user_input, str):
+        input_data = {"role": "user", "content": user_input}
+    else:
+        input_data = user_input
+        
+    if ctx.state.get('conversation_history'):
+        # Use the conversation history directly (it's already in the right format from to_input_list)
+        # Just add the new user message at the end
+        logger.info("Using stored conversation history from previous turns")
+        
+        # Get the stored conversation history
+        conversation_history = ctx.state['conversation_history']
+        
+        # Add new user input to the conversation history
+        # Check if history is already a list of messages or a single message
+        if isinstance(conversation_history, list):
+            # Append the new user input to the history as a properly formatted message
+            input_data = conversation_history.copy()
+            # Format user input as a proper chat message if it's just a string
+            if isinstance(user_input, str):
+                input_data.append({"role": "user", "content": user_input})
+            else:
+                input_data.append(user_input)
+        else:
+            # Create a list with history and new input
+            if isinstance(user_input, str):
+                input_data = [conversation_history, {"role": "user", "content": user_input}]
+            else:
+                input_data = [conversation_history, user_input]
+            
+        logger.debug(f"Combined input with history (length: {len(input_data) if isinstance(input_data, list) else 'not a list'})")
 
     try:
         # --- Start Streaming Run ---
         result_stream = Runner.run_streamed(
-            agent, input=user_input, context=ctx
+            agent, input=input_data, context=ctx
         )
 
         # --- Start Spinner ---
@@ -216,12 +246,24 @@ async def run_agent_streamed(agent: Agent, user_input: str, ctx: AppContext):
             else:
                  print("\n\033[94m🤔 Run finished without generating visible streaming output.\033[0m")
 
-
-        # --- After run completes (before cost display) ---
-        logger.info(f"--- Agent Run Finished ---")
-        logger.info(f"Context State AFTER run: {ctx.state}")
-        logger.info(f"Context Shape AFTER run: v{ctx.shape.version if ctx.shape else 'N/A'}")
-        logger.info(f"Context Actions AFTER run: {ctx.actions[-5:]}") # Log last 5 actions
+        # --- After run completes, store conversation history ---
+        if result_stream:
+            try:
+                # Use to_input_list() to get formatted conversation history for the next turn
+                conversation_history = result_stream.to_input_list()
+                
+                # Store in context for next run
+                ctx.state['conversation_history'] = conversation_history
+                
+                # Log details for debugging
+                history_length = len(conversation_history) if isinstance(conversation_history, list) else 1
+                logger.info(f"Saved conversation history with {history_length} messages")
+                logger.debug(f"Conversation history type: {type(conversation_history)}")
+            except Exception as e:
+                logger.error(f"Error saving conversation history: {e}", exc_info=True)
+                # Ensure conversation_history exists even if saving fails
+                if 'conversation_history' not in ctx.state:
+                    ctx.state['conversation_history'] = []
 
         # --- After run completes (before cost display) ---
         logger.info(f"--- Agent Run Finished ---")
@@ -244,6 +286,7 @@ async def run_agent_streamed(agent: Agent, user_input: str, ctx: AppContext):
             else:
                  print(f"{cost_style_prefix}💰 Cost: ${cost:.4f} ({tokens} tokens, Model: {model_used}){cost_style_suffix}", file=sys.stderr)
 
+        return result_stream
 
     except asyncio.CancelledError:
         # This is expected if the user hits Ctrl+C during the run
@@ -252,24 +295,28 @@ async def run_agent_streamed(agent: Agent, user_input: str, ctx: AppContext):
              with contextlib.suppress(asyncio.CancelledError): await thinking_task
         print("\n\033[93m🚫 Agent run cancelled by user (Ctrl+C).\033[0m")
         # Do not re-raise, let the main loop handle Ctrl+C during input
+        return None
     except AgentsException as e:
         if thinking_task and not thinking_task.done():
             thinking_task.cancel()
             with contextlib.suppress(asyncio.CancelledError): await thinking_task
         print(f"\n\033[91m❌ Agent Error: {e}\033[0m") # Red error ANSI
         logger.error(f"Agent execution error: {e}", exc_info=True)
+        return None
     except ExcelConnectionError as e: # Catch specific Excel errors
         if thinking_task and not thinking_task.done():
             thinking_task.cancel()
             with contextlib.suppress(asyncio.CancelledError): await thinking_task
         print(f"\n\033[91m❌ Excel Connection Error: {e}\033[0m")
         logger.error(f"Excel connection error during agent run: {e}", exc_info=True)
+        return None
     except Exception as e:
         if thinking_task and not thinking_task.done():
             thinking_task.cancel()
             with contextlib.suppress(asyncio.CancelledError): await thinking_task
         print(f"\n\033[91m❌ Unexpected Error during agent run: {e}\033[0m")
         logger.error("Unexpected error during agent run", exc_info=True)
+        return None
     finally:
         # Ensure spinner is always cancelled cleanly
         if thinking_task and not thinking_task.done():
@@ -343,6 +390,8 @@ async def main():
     # --- Initialize Context (without Excel initially) ---
     excel_manager: Optional[ExcelManager] = None
     app_context = AppContext(excel_manager=None) # Start with no manager
+    # Initialize empty conversation history
+    app_context.state['conversation_history'] = []
 
     # --- Input Loop ---
     if PROMPT_TOOLKIT_AVAILABLE:
@@ -397,15 +446,26 @@ async def main():
                         except Exception as e:
                             logger.error(f"Error closing previous workbook during :open: {e}", exc_info=True)
                         finally: # Ensure cleanup regardless of close success
+                            # Preserve conversation history from previous state
+                            conversation_history = app_context.state.get('conversation_history', None)
+                            
                             excel_manager = None
                             app_context.excel_manager = None
                             app_context.shape = None
                             app_context.state = {}
+                            
+                            # Restore conversation history if any
+                            if conversation_history:
+                                app_context.state['conversation_history'] = conversation_history
+                                logger.info("Preserved conversation history after workbook close")
+                                
                             app_context.actions = []
                     try:
                         excel_manager = ExcelManager(file_path=file_path_to_open, visible=True, attach_existing=args.attach, kill_others=args.kill_others)
                         await excel_manager.open()
                         app_context.excel_manager = excel_manager
+                        # Initialize empty conversation history for the new workbook
+                        app_context.state['conversation_history'] = []
                         shape_updated = app_context.update_shape(tool_name=":open") # Update shape and context
                         if shape_updated and app_context.shape:
                             print(f"\033[92m✔️ Workbook '{excel_manager.file_path}' opened (Shape v{app_context.shape.version}).\033[0m")
@@ -424,15 +484,26 @@ async def main():
                          try: await excel_manager.close()
                          except Exception as e: logger.error(f"Error closing previous workbook during :new: {e}", exc_info=True)
                          finally:
+                            # Preserve conversation history from previous state
+                            conversation_history = app_context.state.get('conversation_history', None)
+                            
                             excel_manager = None
                             app_context.excel_manager = None
                             app_context.shape = None
                             app_context.state = {}
+                            
+                            # Restore conversation history if any
+                            if conversation_history:
+                                app_context.state['conversation_history'] = conversation_history
+                                logger.info("Preserved conversation history after workbook close")
+                                
                             app_context.actions = []
                     try:
                         excel_manager = ExcelManager(file_path=None, visible=True, attach_existing=args.attach, kill_others=args.kill_others)
                         await excel_manager.open()
                         app_context.excel_manager = excel_manager
+                        # Initialize empty conversation history for the new workbook
+                        app_context.state['conversation_history'] = []
                         shape_updated = app_context.update_shape(tool_name=":new")
                         if shape_updated and app_context.shape:
                             print(f"\033[92m✔️ New workbook '{excel_manager.file_path}' created (Shape v{app_context.shape.version}).\033[0m")
@@ -455,10 +526,19 @@ async def main():
                             print(f"\033[91m❌ Error closing workbook: {e}\033[0m")
                             logger.error(f"Error closing workbook via :close: {e}", exc_info=True)
                         finally: # Always clean up context state
+                            # Preserve conversation history from previous state
+                            conversation_history = app_context.state.get('conversation_history', None)
+                            
                             excel_manager = None
                             app_context.excel_manager = None
                             app_context.shape = None
                             app_context.state = {}
+                            
+                            # Restore conversation history if any
+                            if conversation_history:
+                                app_context.state['conversation_history'] = conversation_history
+                                logger.info("Preserved conversation history after workbook close")
+                                
                             app_context.actions = []
                             print("\033[93m⚠️ No workbook loaded. Use :open <path> or :new to start.\033[0m")
                     else:
@@ -487,9 +567,51 @@ async def main():
                     print("  :shape          - Show the current workbook structure known to the agent.")
                     print("  :provider [name]- Switch LLM provider (e.g., :provider gemini) or show current/available.")
                     print("  :clear          - Clear the terminal screen.")
+                    print("  :history [clear]- View conversation history status or clear it with ':history clear'.")
+                    print("  :reset-chat     - Reset the conversation history while keeping the workbook open.")
                     print("  :help           - Show this help message.")
                     print("  exit / quit     - Exit the CLI.")
                     print("\nEnter Excel instructions directly otherwise.")
+
+                elif command == "history":
+                    # View or clear conversation history
+                    if cmd_args and cmd_args[0].lower() == "clear":
+                        # Clear the conversation history
+                        app_context.state['conversation_history'] = []
+                        print("\033[92m✔️ Conversation history cleared\033[0m")
+                    else:
+                        # Show conversation history status
+                        history = app_context.state.get('conversation_history', [])
+                        if not history:
+                            print("\033[93m⚠️ No conversation history available\033[0m")
+                        else:
+                            # Count messages by type/role if it's a list
+                            if isinstance(history, list):
+                                count = len(history)
+                                print(f"\033[94mConversation history: {count} messages\033[0m")
+                                # Try to count by role if they're dictionaries with role field
+                                try:
+                                    roles = {}
+                                    for msg in history:
+                                        if isinstance(msg, dict) and 'role' in msg:
+                                            role = msg.get('role', 'unknown')
+                                            roles[role] = roles.get(role, 0) + 1
+                                    if roles:
+                                        for role, count in roles.items():
+                                            print(f"  - {role}: {count} messages")
+                                except Exception as e:
+                                    logger.debug(f"Could not analyze message roles: {e}")
+                            else:
+                                print(f"\033[94mConversation history is available but not in expected format. Type: {type(history)}\033[0m")
+                            print("\nUse ':history clear' to reset conversation history")
+                
+                elif command == "reset-chat":
+                    if excel_manager and app_context.excel_manager:
+                        # Reset conversation history while keeping workbook and other context
+                        app_context.state['conversation_history'] = []
+                        print("\033[92m✔️ Conversation history has been reset. The agent will not remember previous chat messages.\033[0m")
+                    else:
+                        print("\033[93m⚠️ No active workbook to reset conversation for. Use :open or :new first.\033[0m")
 
                 elif command == "shape":
                     if app_context.shape:
