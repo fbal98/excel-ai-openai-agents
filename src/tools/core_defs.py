@@ -1,6 +1,7 @@
 # src/tools/core_defs.py
 import logging
-from typing import Any, Dict, Optional, List, Union, TypedDict
+from typing import Any, Dict, Optional, List, Union
+from typing_extensions import TypedDict  # Use typing_extensions for compatibility
 import asyncio
 from agents import FunctionTool as _FunctionTool # Use alias to avoid potential name clash
 
@@ -13,7 +14,7 @@ class ToolResult(TypedDict, total=False):
     """Standard schema every Excel agent tool must now return."""
     success: bool           # always present – True/False
     error: Optional[str]    # present on failure, None on success
-    data: Any | None        # optional payload (lists, scalars, etc.)
+    data: Optional[Any]     # optional payload (lists, scalars, etc.)
 
 class SetCellValuesResult(ToolResult, total=False):
     """Backward‑compat alias kept for type hints."""

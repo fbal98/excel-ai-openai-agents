@@ -48,11 +48,15 @@ from agents.result import RunResultStreaming, RunResult # Keep RunResult for pot
 from agents.stream_events import StreamEvent
 from agents.exceptions import AgentsException
 from .excel_ops import ExcelConnectionError # Added ExcelConnectionError
+from .model_config import set_active_provider, get_active_provider, list_available_providers
+from .model_integration import get_model_instance, create_agent_model_settings
 
-from .agent_core import excel_assistant_agent
+# Import agent and dynamic prompt function
+from .agent_core import excel_assistant_agent, _dynamic_instructions, create_excel_assistant_agent
 from .context import AppContext, WorkbookShape # Ensure WorkbookShape is imported
 from .excel_ops import ExcelManager
 from .stream_renderer import format_event # Import the event formatter
+from agents import RunContextWrapper # Import RunContextWrapper
 from .constants import SHOW_COST
 
 # --- Logging Setup ---
@@ -82,7 +86,8 @@ logger = logging.getLogger(__name__)
 HISTORY_FILE = ".excel_ai_history"
 
 # --- CLI Styling (Optional, requires prompt_toolkit) ---
-cli_style = Style.from_dict(
+if PROMPT_TOOLKIT_AVAILABLE:
+    cli_style = Style.from_dict(
     {
         "prompt": "bold cyan",
         "prompt.no-workbook": "bold yellow", # Style for when no workbook is open
@@ -249,6 +254,8 @@ async def run_agent_streamed(agent: Agent, user_input: str, ctx: AppContext):
 
 async def main():
     """Main async function for the CLI."""
+    # Declare global variables used in the function
+    global excel_assistant_agent
     # --- Load Environment Variables (Optional) ---
     if DOTENV_AVAILABLE:
         logger.info("Attempting to load environment variables from .env file...")
@@ -508,6 +515,20 @@ async def main():
                         print("\033[93m⚠️ No workbook is currently open.\033[0m")
 
                 elif command.lower() in ["exit", "quit"]:
+                    # --- Print System Prompt on Exit ---
+                    print("\n\033[1m\033[95m--- Current System Prompt ---\033[0m")
+                    try:
+                        # Create a temporary wrapper (only needs context)
+                        temp_wrapper = RunContextWrapper(context=app_context)
+                        # Pass wrapper and agent separately to the dynamic prompt function
+                        # Pass wrapper and agent separately to the dynamic prompt function
+                        current_prompt = _dynamic_instructions(temp_wrapper, excel_assistant_agent)
+                        print(current_prompt)
+                    except Exception as e:
+                        print(f"\033[91mError generating system prompt: {e}\033[0m")
+                        logger.error("Error generating system prompt on exit", exc_info=True)
+                    print("\033[1m\033[95m--- End System Prompt ---\033[0m\n")
+                    # --- End Print System Prompt ---
                     break # Exit CLI loop
 
                 elif command == "clear":
@@ -520,11 +541,47 @@ async def main():
                     print("  :new          - Close current workbook and create a new blank one.")
                     print("  :close        - Close the current workbook.")
                     print("  :shape        - Show the current workbook structure known to the agent.")
+                    print("  :provider     - Show current model provider or switch providers.")
                     print("  :clear        - Clear the terminal screen.")
                     print("  :help         - Show this help message.")
                     print("  exit / quit   - Exit the CLI.")
                     print("Enter Excel instructions directly otherwise.")
 
+                elif command == "shape":
+                    if app_context.shape:
+                        from .agent_core import _format_workbook_shape # Use the formatter
+                        shape_str = _format_workbook_shape(app_context.shape)
+                        print("\n\033[94mCurrent Workbook Shape:\033[0m")
+                        print(shape_str)
+                    elif app_context.excel_manager:
+                        print("\033[93m⚠️ Workbook is open, but shape information is not available (try running an instruction or check logs).\033[0m")
+                    else:
+                        print("\033[93m⚠️ No workbook open to show shape.\033[0m")
+                        
+                elif command == "provider":
+                    # Handle provider command
+                    if not cmd_args:
+                        # Show current provider and available providers
+                        current = get_active_provider()
+                        providers = list_available_providers()
+                        print(f"\n\033[94mCurrent model provider: \033[1m{current}\033[0m")
+                        print("Available providers:")
+                        for provider, available in providers.items():
+                            status = "\033[92m✓ Ready\033[0m" if available else "\033[91m✗ Not configured\033[0m"
+                            print(f"  {provider}: {status}")
+                        print("\nTo switch providers: :provider <name>")
+                    else:
+                        # Switch provider
+                        new_provider = cmd_args[0].lower()
+                        try:
+                            set_active_provider(new_provider)
+                            # Re-initialize the agent with the new model
+                            excel_assistant_agent = create_excel_assistant_agent()
+                            print(f"\033[92m✓ Model provider switched to: {new_provider}\033[0m")
+                            logger.info(f"Model provider switched to: {new_provider} and agent refreshed")
+                        except ValueError as e:
+                            print(f"\033[91m✗ Error: {e}\033[0m")
+                    
                 elif command == "shape":
                     if app_context.shape:
                         from .agent_core import _format_workbook_shape # Use the formatter
@@ -541,6 +598,20 @@ async def main():
 
             # --- Regular Instruction Handling ---
             elif user_input_str.lower() in ["exit", "quit"]:
+                # --- Print System Prompt on Exit ---
+                print("\n\033[1m\033[95m--- Current System Prompt ---\033[0m")
+                try:
+                    # Create a temporary wrapper (only needs context)
+                    temp_wrapper = RunContextWrapper(context=app_context)
+                    # Pass wrapper and agent separately to the dynamic prompt function
+                    # Pass wrapper and agent separately to the dynamic prompt function
+                    current_prompt = _dynamic_instructions(temp_wrapper, excel_assistant_agent)
+                    print(current_prompt)
+                except Exception as e:
+                    print(f"\033[91mError generating system prompt: {e}\033[0m")
+                    logger.error("Error generating system prompt on exit", exc_info=True)
+                print("\033[1m\033[95m--- End System Prompt ---\033[0m\n")
+                # --- End Print System Prompt ---
                 break
             else:
                 # Check if workbook is open before running agent

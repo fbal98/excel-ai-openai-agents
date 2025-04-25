@@ -62,7 +62,7 @@ class AppContext:
     def __init__(
         self,
         *,
-        excel_manager: Any | None = None,
+        excel_manager: Optional[Any] = None,
         state: Optional[Dict[str, Any]] = None,
         shape: Optional[WorkbookShape] = None,
         max_actions: int = 200,
@@ -84,7 +84,7 @@ class AppContext:
     def record_action(
         self,
         *,
-        tool: Dict[str, Any] | str,
+        tool: Union[Dict[str, Any], str],
         args: Dict[str, Any],
         result: Any,
         ok: bool,
@@ -118,7 +118,7 @@ class AppContext:
             return False
 
         try:
-            new_shape: WorkbookShape | None = self.excel_manager.quick_scan_shape()
+            new_shape: Optional[WorkbookShape] = self.excel_manager.quick_scan_shape()
         except ExcelConnectionError as exc: # Catch specific connection error
              logger.error("update_shape skipped – Connection Error during quick_scan_shape: %s", exc)
              # Potentially reset consecutive errors if connection loss caused scan failure?

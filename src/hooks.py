@@ -64,7 +64,7 @@ class SummaryHooks(AgentHooks):
 
         Parameters
         ----------
-        tool : Tool | str
+        tool : Union[Tool, str]
             The tool instance (FunctionTool, computer tool, etc.) or
             its plain-string name.
 

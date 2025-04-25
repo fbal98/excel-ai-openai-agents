@@ -465,7 +465,7 @@ class ExcelManager:
                     if book_still_open:
                         logger.info("Closing managed workbook: %s (%s)", book_name, book_fullname)
                         # Close without saving changes unless explicitly handled elsewhere (e.g., by save tool)
-                        self.book.close(save_changes=True)
+                        self.book.close() # Removed save_changes argument
                         logger.info("Workbook '%s' closed.", book_name)
                     else:
                         logger.warning("Managed workbook '%s' seems to be already closed or app is unavailable.", book_name)
