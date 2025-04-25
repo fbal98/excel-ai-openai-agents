@@ -19,7 +19,8 @@ logger = logging.getLogger(__name__)
 # ----------------------------------------------------------
 #  Shared helper: decide if a tool result means "success”
 # ----------------------------------------------------------
-from .tools import _ensure_toolresult
+# Import from the new location in the tools package
+from .tools.core_defs import _ensure_toolresult, ToolResult
 
 def _is_result_ok(res: Any) -> bool: 
     """
@@ -34,8 +35,10 @@ def _is_result_ok(res: Any) -> bool:
         • res is a dict containing a truthy "error"
         • res is dict with {"success": False}
     """
-    res = _ensure_toolresult(res)
-    return bool(res.get("success", True))
+    # Ensure res is converted to ToolResult format first
+    tool_result = _ensure_toolresult(res)
+    # Now check the 'success' key, defaulting to True if somehow missing (though _ensure should add it)
+    return tool_result.get("success", True)
 
 
 def append_summary_line(app_ctx: "AppContext", line: str, max_lines: int = 15) -> None:
@@ -55,109 +58,40 @@ class SummaryHooks(AgentHooks):
     - If shape refresh succeeds, dump the state (shape + agent_state) to JSON.
     """
 
-    async def on_tool_end(  # noqa: D401
+    def _get_tool_name(self, tool: Tool) -> str:  # noqa: D401
+        """
+        Return a stable, human-readable identifier for *tool*.
+
+        Parameters
+        ----------
+        tool : Tool | str
+            The tool instance (FunctionTool, computer tool, etc.) or
+            its plain-string name.
+
+        Returns
+        -------
+        str
+            The best-effort name to use in logs, summaries, and state.
+        """
+        # Case 1 – already a string (e.g., CLI pseudo-tool)
+        if isinstance(tool, str):
+            return tool
+
+        # Case 2 – wrapped with @function_tool → exposes .name
+        name = getattr(tool, "name", None)
+        if name:
+            return name
+
+        # Case 3 – fall back to the underlying callable’s __name__
+        return getattr(tool, "__name__", str(tool))
+    async def on_tool_end(
         self,
         context: RunContextWrapper[AppContext],
         agent: Agent,
         tool: Tool,
         result: Any,
     ) -> None:
-        # --- 1. Update Summary ---
-        ok = _is_result_ok(result)
-        outcome = "ok" if ok else "error"
-        # Safely get tool name using the new helper
         tool_name = self._get_tool_name(tool)
-        line = f"{tool_name} → {outcome}"
-
-        app_ctx = context.context  # Ensure app_ctx is defined before use
-        state = app_ctx.state
-
-        # Shape update logic is handled by the inheriting class (ActionLoggingHooks)
-        # --- 2. Update summary lines ---
-        append_summary_line(app_ctx, line)
-        # --- 4. (Optional) Log tool result for debugging ---
-        # logger.debug(f"Tool '{tool_name}' result: {result}")
-
-    def _get_tool_name(self, tool: Any) -> str:
-        """Safely gets the name of a tool, handling raw functions."""
-        if isinstance(tool, (Tool, FunctionTool)):
-            return tool.name
-        elif callable(tool):
-            return getattr(tool, '__name__', str(tool))
-        else:
-            return str(tool)
-
-
-class ActionLoggingHooks(SummaryHooks):
-    """
-    Extends SummaryHooks with a rolling action history saved in AppContext.
-    Each tool call is logged with success/failure so the agent can
-    see its recent behaviour. Also handles debounced workbook shape refresh.
-    """
-
-    # ------------------------------------------------------------------
-    #  Helper: pretty-print usage for logs
-    # ------------------------------------------------------------------
-    def _usage_to_str(self, usage: "Usage") -> str:
-        return (
-            f"{usage.requests} requests, "
-            f"{usage.input_tokens} input tokens, "
-            f"{usage.output_tokens} output tokens, "
-            f"{usage.total_tokens} total tokens"
-        )
-
-    # ------------------------------------------------------------------
-    #  New hook: run-level cost logging & persistence
-    # ------------------------------------------------------------------
-    async def on_agent_end(
-        self,
-        context: RunContextWrapper["AppContext"],
-        agent: Agent,
-        output: Any,
-    ) -> None:
-        """Compute cost and persist per-run stats."""
-        # 1. Preserve parent behaviour (currently a no-op but future-proof)
-        await super().on_agent_end(context, agent, output)  # no-op today
-
-        usage = context.usage               # SDK guarantees this object exists
-        cost  = dollars_for_usage(usage, agent.model)
-
-        logger.info("💲 %.4f USD | %s", cost, self._usage_to_str(usage))
-
-        # Persist for other layers (CLI, dashboards, tests)
-        ctx_state = context.context.state
-        ctx_state["last_run_usage"] = usage.model_dump()   # pydantic helper
-        ctx_state["last_run_cost"]  = cost
-
-    async def on_tool_start(
-        self,
-        context: RunContextWrapper[AppContext],
-        agent: Agent,
-        tool: Tool,
-        args: Optional[Dict[str, Any]] = None,
-    ) -> None:
-        """Cache real arguments so we can log them accurately later."""
-        tool_name = self._get_tool_name(tool) # Use helper here too
-        logger.debug(f"HOOK: on_tool_start - tool type: {type(tool)}, tool: {tool}, tool_name: {tool_name}, args: {args}")
-
-        # Store args only if provided by the SDK
-        if args is not None:
-            context.context.state["_last_args"] = args
-        else:
-            # Ensure _last_args exists even if SDK fails to provide args
-            context.context.state["_last_args"] = {}
-            logger.debug(
-                f"SDK did not provide args to on_tool_start for tool '{tool_name}'. Logging args as empty."
-            )
-
-    async def on_tool_end(  # noqa: D401
-        self,
-        context: RunContextWrapper[AppContext],
-        agent: Agent,
-        tool: Tool,
-        result: Any,
-    ) -> None:
-        tool_name = self._get_tool_name(tool) # Use helper
         logger.debug(f"HOOK: on_tool_end - tool type: {type(tool)}, tool: {tool}, tool_name: {tool_name}, result: {result}")
 
         args = context.context.state.pop("_last_args", {})
@@ -169,6 +103,13 @@ class ActionLoggingHooks(SummaryHooks):
             result=result,
             ok=ok,
         )
+        # --- Track current sheet for future turns ---
+        if ok and tool_name == "create_sheet_tool":
+            sheet_created = args.get("sheet_name")
+            if sheet_created:
+                context.context.state["current_sheet"] = sheet_created
+        elif ok and tool_name == "get_active_sheet_name_tool" and isinstance(result, str):
+            context.context.state["current_sheet"] = result
         # Call parent (SummaryHooks) to retain summary logic *before* handling shape update
         # This will append the summary line using the safe tool_name getter.
         await super().on_tool_end(context, agent, tool, result)
@@ -178,6 +119,7 @@ class ActionLoggingHooks(SummaryHooks):
         # ── Debounced workbook‑shape refresh ─────────────────────────
         if tool_name in WRITE_TOOLS:
             app_ctx.pending_write_count += 1
+            # --- Corrected Indentation Starts Here ---
             should_scan = (
                 tool_name in STRUCTURAL_WRITE_TOOLS
                 or app_ctx.pending_write_count >= SHAPE_SCAN_EVERY_N_WRITES
@@ -196,10 +138,10 @@ class ActionLoggingHooks(SummaryHooks):
                         # Update_shape might return False if scan failed or was skipped.
                         # Keep the counter incrementing if the scan didn't actually happen or failed.
                         # If update_shape returned False due to an error, the error is logged within update_shape.
-                         if app_ctx.shape: # Log current state if scan failed but shape exists
-                             logger.debug(f"Shape update skipped or failed for tool {tool_name}. Current shape v{app_ctx.shape.version}, pending writes: {app_ctx.pending_write_count}")
-                         else:
-                             logger.debug(f"Shape update skipped or failed for tool {tool_name}. No current shape. Pending writes: {app_ctx.pending_write_count}")
+                        if app_ctx.shape: # Log current state if scan failed but shape exists
+                            logger.debug(f"Shape update skipped or failed for tool {tool_name}. Current shape v{app_ctx.shape.version}, pending writes: {app_ctx.pending_write_count}")
+                        else:
+                            logger.debug(f"Shape update skipped or failed for tool {tool_name}. No current shape. Pending writes: {app_ctx.pending_write_count}")
 
                 except Exception as e:
                     logger.error(f"Error during workbook shape refresh or state dump for tool {tool_name}: {e}")
@@ -207,24 +149,25 @@ class ActionLoggingHooks(SummaryHooks):
                     # Resetting might prevent scans for a while if errors persist.
                     # Not resetting might trigger scans too often if errors are transient.
                     # Let's keep the counter growing for now to potentially retry scanning later.
-        else:
+            # The 'else' for 'if should_scan' is implicitly handled now: if it wasn't a write tool OR should_scan was False, this block is skipped.
+        # --- Corrected Indentation Ends Here ---
+        else: # This 'else' corresponds to 'if tool_name in WRITE_TOOLS:'
             logger.debug(
                 f"Read tool '{tool_name}' executed. Skipping workbook shape refresh check."
             )
 
-
         # ── Self‑regulation: abort on repeated failures ──────────────────
-        is_err = not ok # Use the result of _is_result_ok
+        is_err = not ok  # Use the result of _is_result_ok
         error_msg = ""
-        if is_err and isinstance(result, dict):
-             error_msg = result.get("error", "Unknown error")
-        elif is_err:
-             error_msg = f"Operation failed with result: {result}"
+        tool_result = _ensure_toolresult(result)  # Ensure we have ToolResult format
 
+        if is_err:
+            # Access 'error' from the standardized tool_result dictionary
+            error_msg = tool_result.get("error", f"Operation failed with result: {result}")
 
         if is_err:
             key = (tool_name, error_msg)
-            if key == app_ctx.last_error_key and error_msg: # Only count consecutive if error msg is same
+            if key == app_ctx.last_error_key and error_msg:  # Only count consecutive if error msg is same
                 app_ctx.consecutive_errors += 1
             else:
                 app_ctx.consecutive_errors = 1
@@ -232,14 +175,14 @@ class ActionLoggingHooks(SummaryHooks):
         else:
             # Any successful tool call resets the error loop completely
             app_ctx.consecutive_errors = 0
-            app_ctx.last_error_key = ("", "") # Reset key
+            app_ctx.last_error_key = ("", "")  # Reset key
 
         if app_ctx.consecutive_errors > MAX_CONSECUTIVE_ERRORS:
             logger.error(
-                 f"Aborting run: Tool '{tool_name}' failed {app_ctx.consecutive_errors} times consecutively with error: {error_msg}"
-             )
+                f"Aborting run: Tool '{tool_name}' failed {app_ctx.consecutive_errors} times consecutively with error: {error_msg}"
+            )
             # Raise specific exception rather than generic RuntimeError
-            from agents.exceptions import MaxTurnsExceeded # Or a more specific error if available
+            from agents.exceptions import MaxTurnsExceeded  # Or a more specific error if available
             raise MaxTurnsExceeded(
                 f"Aborting run: Tool '{tool_name}' failed {app_ctx.consecutive_errors} times consecutively."
             )

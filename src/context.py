@@ -119,12 +119,19 @@ class AppContext:
 
         try:
             new_shape: WorkbookShape | None = self.excel_manager.quick_scan_shape()
+        except ExcelConnectionError as exc: # Catch specific connection error
+             logger.error("update_shape skipped – Connection Error during quick_scan_shape: %s", exc)
+             # Potentially reset consecutive errors if connection loss caused scan failure?
+             # self.consecutive_errors = 0 # Resetting might hide underlying issues
+             return False # Shape update failed due to connection
         except Exception as exc:  # pragma: no cover – depends on xlwings runtime
-            logger.warning("quick_scan_shape() failed: %s", exc)
-            return False
+            logger.warning("quick_scan_shape() failed with unexpected error: %s", exc)
+            return False # Shape update failed
+
 
         if new_shape is None:
-            logger.debug("quick_scan_shape() returned None – shape unchanged")
+            # This might happen if quick_scan_shape returns None on error internally now
+            logger.debug("quick_scan_shape() returned None – potentially due to internal error or no change.")
             return False
 
         # Increment version whenever the shape *really* changes

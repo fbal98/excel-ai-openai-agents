@@ -1,549 +1,589 @@
-"""Commandâ€‘line interface for the Autonomous Excel Assistant (single realâ€‘time mode)."""
+#!/usr/bin/env python
+"""
+Interactive command-line interface for the Excel AI Assistant.
+Starts without an active workbook. Use commands like :open, :new, :close.
+"""
 
-from __future__ import annotations
-
-import argparse
 import asyncio
+import contextlib
+import itertools
 import logging
 import os
 import sys
-import time
-from collections import deque
+import shlex # For parsing slash commands
+from typing import Optional, Any
 
-# Environment switch – set OPENAI_SHOW_COST=0 to disable cost displays
-SHOW_COST = os.getenv("OPENAI_SHOW_COST", "1") == "1"
-from typing import Optional, List, Dict
+# Third-party imports
+try:
+    # Use prompt_toolkit if available for better UX
+    from prompt_toolkit import PromptSession
+    from prompt_toolkit.history import FileHistory
+    from prompt_toolkit.auto_suggest import AutoSuggestFromHistory
+    from prompt_toolkit.styles import Style
+    PROMPT_TOOLKIT_AVAILABLE = True
+except ImportError:
+    PROMPT_TOOLKIT_AVAILABLE = False
+    logging.getLogger(__name__).info(
+        "Optional dependency `prompt_toolkit` not found. Falling back to basic input(). "
+        "Install with: pip install prompt_toolkit for a richer CLI experience."
+    )
 
-from dotenv import load_dotenv
-from agents import Runner, ItemHelpers
-from agents.stream_events import RunItemStreamEvent
-from openai.types.responses import ResponseTextDeltaEvent
+try:
+    # Use getch for single-character input (optional, e.g., for step collapse)
+    from getch import getch as _sync_getch # Alias to avoid name clash
+    GETCH_AVAILABLE = True
+except ImportError:
+    GETCH_AVAILABLE = False
 
-# â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
-#  RichÂ powerâ€‘ups (colour, panels, prompts â€¦)
-# â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
-from rich.console import Console, Group
-from rich.layout import Layout
-from rich.logging import RichHandler
+# Third-party imports (optional)
+try:
+    from dotenv import load_dotenv
+    DOTENV_AVAILABLE = True
+except ImportError:
+    DOTENV_AVAILABLE = False
 
-# ------------------------------------------------------------------
-# Stop log "echoâ€ť to stderr; only warnings+ should bypass Live panel
-# ------------------------------------------------------------------
-RichHandler.level = logging.WARNING
-from rich.panel import Panel
-from rich.prompt import Prompt
-from rich.live import Live
-import threading, queue, getchlib
+# Local project imports
+from agents import Runner, Agent
+from agents.result import RunResultStreaming, RunResult # Keep RunResult for potential future use
+from agents.stream_events import StreamEvent
+from agents.exceptions import AgentsException
+from .excel_ops import ExcelConnectionError # Added ExcelConnectionError
 
-# ------------------------------------------------------------------
-# 1. Global helpers for the realâ€‘time input buffer
-# ------------------------------------------------------------------
-_KEY_QUEUE: "queue.Queue[str]" = queue.Queue()
-
-class _InputBuffer:
-    """Holds the text the user is currently typing."""
-    def __init__(self) -> None:
-        self._chars: list[str] = []
-        self.lock = threading.Lock()
-
-    def append(self, ch: str) -> None:
-        with self.lock:
-            self._chars.append(ch)
-
-    def backspace(self) -> None:
-        with self.lock:
-            if self._chars:
-                self._chars.pop()
-
-    def clear(self) -> str:
-        with self.lock:
-            out = "".join(self._chars)
-            self._chars.clear()
-            return out
-
-    def __str__(self) -> str:
-        with self.lock:
-            return "".join(self._chars)
-
-_input_buffer = _InputBuffer()
-
-# ------------------------------------------------------------------
-# 2. Background thread that reads one key at a time
-# ------------------------------------------------------------------
-def _keyboard_loop(render_input_cb, live) -> None:
-    while True:
-        # Read a key *without* echoing it to the terminal. When echo is enabled,
-        # the character is briefly printed outside the Live layout and then
-        # cleared on each refresh, which made the input appear to "disappearâ€ť.
-        ch = getchlib.getkey(echo=False)
-        if ch in ("\x03", "\x04"):          # Ctrlâ€‘C / Ctrlâ€‘D â€“ exit app
-            _KEY_QUEUE.put_nowait("__EXIT__")
-            break
-        if ch in ("\r", "\n"):              # ENTER â€“ submit current buffer
-            _KEY_QUEUE.put_nowait(_input_buffer.clear())
-        elif ch in ("\x7f", "\b"):          # Backspace
-            _input_buffer.backspace()
-        elif ch.isprintable():
-            _input_buffer.append(ch)
-
-        # Reâ€‘paint the input panel *immediately* from any thread
-        # Pass the latest buffer contents explicitly to avoid stale snapshots.
-        # â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
-        # Rich â‰ĄÂ 13.4 ships `Console.call_from_thread`, which safely queues a
-        # drawâ€‘call onto the main render loop.  On older Rich versions the
-        # attribute is missing â†’ calling it raises `AttributeError` inside this
-        # background thread, killing the thread and causing the user's typed
-        # characters to "disappearâ€ť.  We therefore:
-        #   1. Prefer the modern helper when present.
-        #   2. Gracefully fall back to calling the renderer directly when absent.
-        # Because `_keyboard_loop` already executes off the main thread, the
-        # direct call is safe and keeps the input panel responsive.
-        # â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
-        try:
-            live.console.call_from_thread(render_input_cb, str(_input_buffer))
-        except AttributeError:
-            # Fallback path for RichÂ <Â 13.4
-            render_input_cb(str(_input_buffer))
-from rich.text import Text
-
-# â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
-#  Project imports
-# â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 from .agent_core import excel_assistant_agent
-from .context import AppContext
+from .context import AppContext, WorkbookShape # Ensure WorkbookShape is imported
 from .excel_ops import ExcelManager
+from .stream_renderer import format_event # Import the event formatter
+from .constants import SHOW_COST
+
+# --- Logging Setup ---
+log_level_name = os.getenv("LOG_LEVEL", "INFO").upper()
+log_level = getattr(logging, log_level_name, logging.INFO)
+log_file = os.getenv("EXCEL_AI_LOG_FILE", "excel_ai.log")
+
+for _h in logging.root.handlers[:]:
+    logging.root.removeHandler(_h)
+
+_file_handler = logging.FileHandler(log_file, mode="a", encoding="utf-8")
+_file_handler.setLevel(log_level)
+_file_handler.setFormatter(
+    logging.Formatter("%(asctime)s - %(name)s - %(levelname)s - %(message)s")
+)
+
+_console_handler = logging.StreamHandler(sys.stderr)
+_console_handler.setLevel(logging.WARNING) # Default: only warnings/errors to console
+_console_handler.setFormatter(
+    logging.Formatter("%(asctime)s - %(levelname)s - %(message)s")
+)
+
+logging.basicConfig(level=log_level, handlers=[_file_handler, _console_handler])
+logger = logging.getLogger(__name__)
+
+# --- Configuration ---
+HISTORY_FILE = ".excel_ai_history"
+
+# --- CLI Styling (Optional, requires prompt_toolkit) ---
+cli_style = Style.from_dict(
+    {
+        "prompt": "bold cyan",
+        "prompt.no-workbook": "bold yellow", # Style for when no workbook is open
+        "input": "",
+        # Colors handled by stream_renderer ANSI codes now
+        # "output.agent": "green",
+        # "output.tool": "yellow",
+        # "output.error": "bold red",
+        "output.info": "cyan",
+        "output.warning": "yellow",
+        "output.success": "green",
+        "output.cost": "italic #888888", # Keep for cost display
+        "spinner": "magenta",
+    }
+)
+
+# --- Helper Functions ---
+
+async def _spinner(prefix="⌛ Thinking", interval=0.2):
+    """Simple async spinner using UTF-8 characters."""
+    try:
+        is_tty = sys.stdout.isatty()
+        supports_utf8 = sys.stdout.encoding.lower() == "utf-8"
+
+        if not is_tty or not supports_utf8:
+            print(f"{prefix} ...", end="", flush=True)
+            while True:
+                await asyncio.sleep(interval * 5) # Keep sleeping if not a TTY
+
+        spinner_chars = "|/-\\" # Simpler spinner
+        for char in itertools.cycle(spinner_chars):
+            # Magenta spinner prefix using ANSI code
+            print(f"\r\033[95m{prefix}\033[0m {char} ", end="", flush=True)
+            await asyncio.sleep(interval)
+    except asyncio.CancelledError:
+        # Clean up the spinner line
+        clear_len = len(prefix) + 1 + 1 # prefix + char + space
+        if sys.stdout.isatty(): # Only clear if TTY
+            print("\r" + " " * clear_len + "\r", end="", flush=True)
+        else:
+            print() # Newline if not TTY
+        raise # Re-raise CancelledError
+    except Exception as e:
+        logger.error(f"Spinner error: {e}", exc_info=True)
+        clear_len = len(prefix) + 1 + 1
+        if sys.stdout.isatty(): # Only clear if TTY
+            print("\r" + " " * clear_len + "\r", end="", flush=True)
+        else:
+            print() # Newline if not TTY
 
 
-console = Console(highlight=False)
-
-# â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
-#  Argument parsing
-# â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
-def parse_args() -> argparse.Namespace:
-    p = argparse.ArgumentParser(description="Autonomous Excel Assistant (realâ€‘time)")
-    p.add_argument("--input-file", type=str, help="Path to an existing workbook.")
-    p.add_argument("--output-file", type=str, help="Path to save at the end (optional).")
-    p.add_argument("--instruction", type=str, help="Oneâ€‘shot instruction for the agent.")
-    p.add_argument("--interactive", "-i", action="store_true", help="Interactive chat mode.")
-    p.add_argument("--stream", action="store_true", help="Stream the agent's reasoning/output.")
-    p.add_argument("-v", "--verbose", action="store_true", help="Verbose (DEBUG) logging.")
-    p.add_argument("--trace-off", action="store_true", help="Disable OpenAI tracing for this run.")
-    p.add_argument("--hide-stats", action="store_true",
-                   help="Suppress token & cost summary after each run.")
-    return p.parse_args()
-
-
-# â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
-#  Layout-based logging handler
-# â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
-class LiveLogHandler(logging.Handler):
+async def run_agent_streamed(agent: Agent, user_input: str, ctx: AppContext):
     """
-    Custom handler that keeps a rolling log in memory
-    and displays it in a fixed top panel of the Layout.
+    Runs the agent using Runner.run_streamed and renders events live.
+    Handles the spinner and event formatting using stream_renderer.py.
     """
+    if not ctx.excel_manager or not ctx.excel_manager.book:
+        print("\n\033[93m⚠️ No active workbook. Use ':open <path>' or ':new' first.\033[0m")
+        return # Cannot run agent without a workbook
 
-    def __init__(self, live: Live, layout: Layout, max_records: int = 100) -> None:
-        super().__init__()
-        self.records = deque(maxlen=max_records)
-        self.live = live
-        self.layout = layout
-
-    def emit(self, record: logging.LogRecord) -> None:
-        # Keep only INFO / DEBUG in the top panel; warnings+ will go to console
-        if record.levelno > logging.INFO:
-            return
-
-        msg = self.format(record)
-        level_style = {
-            logging.DEBUG: "dim cyan",
-            logging.INFO: "green",
-        }.get(record.levelno, "white")
-
-        # Deâ€‘dupe consecutive identical INFO/DEBUG lines
-        if not self.records or self.records[-1].plain != msg:
-            self.records.append(Text(msg, style=level_style))
-
-        # Update the "logs" layout panel
-        def _refresh() -> None:
-            self.layout["logs"].update(
-                Panel(
-                    Text("\n").join(self.records),
-                    title="Logs",
-                    border_style="blue",
-                    padding=(0, 1),
-                    height=8,
-                )
-            )
-            self.live.update(self.layout, refresh=True)
-
-        # Attempt a thread-safe call if supported
-        try:
-            self.live.console.call_from_thread(_refresh)
-        except AttributeError:
-            _refresh()
-
-    def close(self) -> None:
-        try:
-            # Final update before stopping
-            self.layout["logs"].update(
-                Panel(
-                    Text("\n").join(self.records),
-                    title="Logs",
-                    border_style="blue",
-                    padding=(0, 1),
-                    height=8,
-                )
-            )
-            self.live.update(self.layout, refresh=True)
-            self.live.stop()
-        except Exception:
-            pass
-        super().close()
-
-
-# â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
-#  Stream helper
-# â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
-async def handle_streaming(result, verbose: bool):
-    """
-    Prettyâ€‘print streaming events if requested. In nonâ€‘interactive,
-    we show the agent's final output or incremental tokens.
-    """
-    logger = logging.getLogger(__name__)
-    final_output = ""
-    last_msg: Optional[str] = None
+    thinking_task = None
+    spinner_prefix = "🤖 Thinking"
+    result_stream: Optional[RunResultStreaming] = None # Initialize
 
     try:
-        async for event in result.stream_events():
-            # Raw LLM deltas
-            if (
-                event.type == "raw_response_event"
-                and isinstance(event.data, ResponseTextDeltaEvent)
-            ):
-                delta = event.data.delta
-                final_output += delta
-                if last_msg is None:
-                    last_msg = final_output
-                if verbose:
-                    console.print(delta, end="")
-                continue
-
-            # Detailed events from the agent
-            if event.type != "run_item_stream_event":
-                continue
-
-            item: RunItemStreamEvent = event.item
-            if item.type == "tool_call_item" and verbose:
-                console.print(f"[cyan]đź› ď¸Ź  {item.function_name}[/]")
-            elif item.type == "tool_call_output_item" and verbose:
-                ok = "âś”" if "error" not in item.output else "âś–"
-                colour = "green" if ok == "âś”" else "red"
-                console.print(f"   â†ł [{colour}]{ok} {item.output}[/{colour}]")
-            elif item.type == "message_output_item":
-                text = ItemHelpers.text_message_output(item)
-                last_msg = text
-                if verbose:
-                    console.print(f"[magenta]đź’¬ {text}[/]")
-    except Exception as e:  # pragma: no cover
-        logger.error("Streaming error: %s", e, exc_info=True)
-        final_output += f"\n\n[Streaming error: {e}]"
-
-    class _Result:
-        def __init__(self, text: str):
-            self.final_output = text
-
-    return _Result(last_msg or final_output)
-
-
-# â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
-#  Main
-# â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
-async def main() -> None:
-    load_dotenv()
-    if not os.getenv("OPENAI_API_KEY"):
-        console.print("[bold red]âťŚ OPENAI_API_KEY not set â€“ aborting.[/]")
-        sys.exit(1)
-
-    args = parse_args()
-
-    # Build a Layout with top logs (fixed height) & bottom chat
-    layout = Layout(name="root")
-    # Top â†’ Logs (fixed), middle â†’ Chat (flex), bottom â†’ Input (fixed)
-    layout.split_column(
-        Layout(name="logs",  size=8),
-        Layout(name="stats", size=3),     # NEW
-        Layout(name="chat",  ratio=1),
-        Layout(name="input", size=3),
-    )
-
-    # Start a Live display with our layout (alternate screen avoids flicker)
-    live = Live(
-        layout,
-        console=console,
-        refresh_per_second=10,
-        screen=True,
-        redirect_stdout=False,   # donâ€™t let prints escape the layout
-    )
-    live.__enter__()  # We'll manually manage the context
-
-    # Build a logging handler to feed the top panel
-    live_handler = LiveLogHandler(live=live, layout=layout)
-    rich_handler = RichHandler(rich_tracebacks=True, console=console, markup=True)
-    # Only show WARNING+ in the scrolling console
-    rich_handler.setLevel(logging.WARNING)
-
-    # Remove *all* preâ€‘existing handlers to avoid duplicates, then install ours
-    root = logging.getLogger()
-    root.handlers.clear()
-    logging.basicConfig(
-        level=logging.DEBUG if args.verbose else logging.INFO,
-        format="%(message)s",
-        handlers=[live_handler, rich_handler],
-        force=True,        # PythonÂ 3.13+; on 3.11/3.12 we did .handlers.clear()
-    )
-    logger = logging.getLogger(__name__)
-
-    if args.verbose:
-        logger.debug("Verbose logging enabled (DEBUG level).")
-
-    # We'll store chat messages in a list for the bottom panel
-    chat_history: List[Dict[str, str]] = []
-
-    def render_chat_panel() -> None:
-        """
-        Update the 'chat' panel in the layout.
-
-        Each utterance is rendered in its own bordered Panel titled
-        "Youâ€ť or "Assistantâ€ť, stacked vertically so the interface resembles
-        a classic chat transcript while the Logs panel remains fixed above.
-        """
-        message_panels: List[Panel] = []
-        for msg in chat_history:
-            role = msg.get("role", "system")
-            text = msg.get("content", "")
-
-            if role == "user":
-                panel = Panel(
-                    Text(text),
-                    title="You",
-                    border_style="cyan",
-                    padding=(0, 1),
-                )
-            elif role == "assistant":
-                panel = Panel(
-                    Text(text),
-                    title="Assistant",
-                    border_style="magenta",
-                    padding=(0, 1),
-                )
-            else:  # e.g. system or other roles
-                panel = Panel(
-                    Text(text),
-                    title=role.capitalize(),
-                    border_style="grey58",
-                    padding=(0, 1),
-                )
-
-            message_panels.append(panel)
-
-        # Keep only the most recent 50 messages to avoid unbounded growth
-        message_panels = message_panels[-50:]
-
-        # Stack the panels in the chat area
-        layout["chat"].update(Group(*message_panels))
-        render_stats_panel()  # keep stats in sync
-        live.update(layout, refresh=True)
-
-    # Stats panel render helper
-    def render_stats_panel() -> None:
-        """
-        Update the small 'stats' panel with token and cost info.
-        Hidden when --hide-stats is set or OPENAI_SHOW_COST=0.
-        """
-        if args.hide_stats or not SHOW_COST:
-            layout["stats"].update(Text(""))  # keep height stable
-            return
-
-        u    = ctx.state.get("last_run_usage", {})
-        cost = ctx.state.get("last_run_cost", 0.0)
-        body = (
-                        f"""Tokens: {u.get('total_tokens',0)} 
-            (in={u.get('input_tokens',0)}, out={u.get('output_tokens',0)})
-            Cost:   ${cost:,.4f}"""
-        )
-        layout["stats"].update(
-            Panel(Text(body), title="Stats", border_style="yellow", padding=(0,1))
+        # --- Start Streaming Run ---
+        result_stream = Runner.run_streamed(
+            agent, input=user_input, context=ctx
         )
 
-    # new input panel render helper
-    def render_input_panel(content: str = "") -> None:
-        """
-        Keep the user's current input visible *inside* the layout.
-        """
-        layout["input"].update(
-            Panel(
-                Text(content if content else " ", overflow="fold"),
-                title="You",
-                border_style="cyan",
-                padding=(0, 1),
-            )
-        )
-        live.update(layout, refresh=True)
+        # --- Start Spinner ---
+        if sys.stdout.isatty():
+            thinking_task = asyncio.create_task(_spinner(prefix=spinner_prefix))
+        else:
+            print(f"{spinner_prefix}...", flush=True) # Simple message for non-TTY
 
-    # â”€â”€â”€â”€â”€â”€â”€â”€â”€ Excel session â”€â”€â”€â”€â”€â”€â”€â”€â”€
-    try:
-        async with ExcelManager(
-            file_path=args.input_file,
-            visible=True,
-            attach_existing=True,
-            single_workbook=True,
-        ) as excel_mgr:
-            ctx = AppContext(excel_manager=excel_mgr)
-            ctx.update_shape()  # first shape scan
-            render_stats_panel()           # initial blank box
+        # --- Process Events ---
+        first_meaningful_event_received = False
+        async for ev in result_stream.stream_events():
+            logger.debug(f"Received StreamEvent: {ev}") # Log raw event for debugging
+            formatted_output = format_event(ev) # Use the renderer
+            if formatted_output:
+                logger.debug(f"Formatted Output: {formatted_output}") # Log formatted output
 
-            if args.input_file:
-                console.print(f"đź“‚ Opened workbook: [bold]{args.input_file}[/]")
-            else:
-                console.print("đź†• Started new workbook.")
+                # --- Stop Spinner on First Output ---
+                if not first_meaningful_event_received and thinking_task and not thinking_task.done():
+                    first_meaningful_event_received = True
+                    thinking_task.cancel()
+                    with contextlib.suppress(asyncio.CancelledError):
+                        await thinking_task # Wait for spinner to clean up
 
-            # ============ INTERACTIVE ============
-            if args.interactive:
-                chat_history.append(
-                    {
-                        "role": "assistant",
-                        "content": "Hello! How can I help you today?",
-                    }
-                )
-                render_chat_panel()
-                render_input_panel("")   # clear input box
-                render_input_panel("")  # seed empty input box
-                console.print(
-                    "(Type your question. Blank line to submit. 'exit' to quit.)"
-                )
+                # --- Print Formatted Event ---
+                print(formatted_output)
+                sys.stdout.flush() # Ensure output is visible immediately
 
-                # --- NEW realâ€‘time input loop --------------------
-                kb_thread = threading.Thread(target=_keyboard_loop, args=(render_input_panel, live), daemon=True)
-                kb_thread.start()
+        # --- Ensure Spinner is Stopped After Loop ---
+        if thinking_task and not thinking_task.done():
+            thinking_task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await thinking_task
 
-                while True:
-                    try:
-                        # Block until ENTER or Ctrlâ€‘D / Ctrlâ€‘C
-                        user_msg = _KEY_QUEUE.get()
-                        if user_msg == "__EXIT__":
-                            console.print("\n[bold red]Goodâ€‘bye đź‘‹[/]")
-                            return
-                        if not user_msg.strip():
-                            render_input_panel("")   # clear input box
-                            continue
-                        if user_msg.lower() in {"exit", "quit"}:
-                            break
-
-                        # Add user's message
-                        chat_history.append({"role": "user", "content": user_msg})
-                        render_chat_panel()
-                        render_input_panel("")  # reset input box
-
-                        # Invoke the agent
-                        res = await Runner.run(
-                            excel_assistant_agent,
-                            input=user_msg,
-                            context=ctx,
-                            max_turns=25,
-                        )
-                        await excel_mgr.ensure_changes_applied()
-                        reply = res.final_output
-
-                        # Add agent's answer
-                        chat_history.append({"role": "assistant", "content": reply})
-                        render_chat_panel()
-
-                    except (KeyboardInterrupt, EOFError):
-                        console.print("\n[bold red]Goodâ€‘bye đź‘‹[/]")
-                        break
-                    except Exception as e:
-                        logger.error("Error during agent run: %s", e, exc_info=True)
-                        console.print(f"[bold red]Error:[/] {e}")
-
-                return
-
-            # ============ ONE-SHOT ============
-            if not args.instruction:
-                console.print(
-                    "[bold red]âš  No instruction provided. Use --instruction or -i for interactive mode.[/]"
-                )
-                sys.exit(1)
-
-            logger.info("đź’ˇ Instruction: %s", args.instruction)
-            start = time.monotonic()
-
-            # Add the user instruction to chat panel for clarity
-            chat_history.append({"role": "user", "content": args.instruction})
-            render_chat_panel()
-
-            try:
-                if args.stream:
-                    streamed = await Runner.run_streamed(
-                        excel_assistant_agent,
-                        input=args.instruction,
-                        context=ctx,
-                        max_turns=25,
-                    )
-                    result = await handle_streaming(streamed, args.verbose)
+        # --- Handle Final Output (if stream didn't print anything) ---
+        # This might happen if the agent finishes without a final message chunk
+        # or if the final event wasn't handled by format_event (unlikely with current renderer)
+        if not first_meaningful_event_received:
+            # Try flushing the buffer one last time
+            final_flush = format_event(None) # Pass None to trigger final flush if needed
+            if final_flush:
+                print(final_flush)
+            elif result_stream and result_stream.final_output:
+                # If flush didn't work but we have final output, print it minimally
+                final_output_str = result_stream.final_output
+                if isinstance(final_output_str, str):
+                    # Basic agent final output formatting (fallback)
+                    prefix = "✔️ 🤖 Agent: "
+                    indent = " " * len(prefix)
+                    lines = final_output_str.splitlines()
+                    formatted_lines = [f"\033[92m{prefix if i == 0 else indent}{line}\033[0m" for i, line in enumerate(lines)]
+                    print("\n".join(formatted_lines))
                 else:
-                    result = await Runner.run(
-                        excel_assistant_agent,
-                        input=args.instruction,
-                        context=ctx,
-                        max_turns=25,
-                    )
-            except Exception as e:
-                logger.error("âťŚ Agent error: %s", e, exc_info=True)
-                sys.exit(1)
+                    print(f"\033[94m🤔 Run finished. Final output (non-string): {result_stream.final_output}\033[0m")
 
-            await excel_mgr.ensure_changes_applied()
+            else:
+                print("\033[94m🤔 Run finished without generating visible streaming output.\033[0m")
 
-            # ── Plain cost summary ───────────────────────────────
-            if SHOW_COST and not args.hide_stats:
-                u     = ctx.state.get("last_run_usage", {})
-                cost  = ctx.state.get("last_run_cost", 0.0)
-                console.print(
-                    f"[bold green]Tokens:[/] {u.get('total_tokens', 0)} "
-                    f"(in={u.get('input_tokens',0)}, out={u.get('output_tokens',0)})"
-                )
-                console.print(f"[bold yellow]Cost:[/] ${cost:,.4f}")
 
-            reply = result.final_output
-            elapsed = time.monotonic() - start
+        # --- Display Cost ---
+        # Cost info should be available in context.state after the run completes
+        if SHOW_COST and hasattr(ctx, 'state') and 'last_run_cost' in ctx.state:
+            cost = ctx.state.get('last_run_cost', 0.0)
+            usage_info = ctx.state.get('last_run_usage', {})
+            tokens = usage_info.get('total_tokens', 'N/A')
+            # Use ANSI codes for style
+            print(f"\033[90m\033[3m💰 Cost: ${cost:.4f} ({tokens} tokens)\033[0m", file=sys.stderr)
 
-            logger.info("Done in %.1fs", elapsed)
 
-            # Show final output in chat
-            chat_history.append({"role": "assistant", "content": reply})
-            render_chat_panel()
-
-            # ---------- Optional save ----------
-            if args.output_file:
-                try:
-                    saved = await excel_mgr.save_with_confirmation(args.output_file)
-                    console.print(f"[bold green]đź’ľ Workbook saved to {saved}[/]")
-                except Exception as e:
-                    logger.error("Failed to save workbook: %s", e, exc_info=True)
-                    console.print(f"[bold red]âťŚ Save failed:[/] {e}")
-
-    except Exception as e:  # pragma: no cover
-        logger.error("Fatal error: %s", e, exc_info=True)
-        console.print(f"[bold red]âťŚ Fatal error:[/] {e}")
-        sys.exit(1)
+    except asyncio.CancelledError:
+        if thinking_task and not thinking_task.done():
+            thinking_task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await thinking_task
+        print("\n\033[93m🚫 Operation cancelled by user (Ctrl+C).\033[0m")
+    except AgentsException as e:
+        if thinking_task and not thinking_task.done():
+            thinking_task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await thinking_task
+        print(f"\n\033[91m❌ Agent Error: {e}\033[0m")
+        logger.error(f"Agent execution error: {e}", exc_info=True)
+    except Exception as e:
+        if thinking_task and not thinking_task.done():
+            thinking_task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await thinking_task
+        print(f"\n\033[91m❌ Unexpected Error: {e}\033[0m")
+        logger.error("Unexpected error during agent run", exc_info=True)
     finally:
-        # Stop live logging
-        live_handler.close()
-        live.__exit__(None, None, None)
+        # Ensure spinner is always cancelled
+        if thinking_task and not thinking_task.done():
+            thinking_task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await thinking_task
 
 
+async def main():
+    """Main async function for the CLI."""
+    # --- Load Environment Variables (Optional) ---
+    if DOTENV_AVAILABLE:
+        logger.info("Attempting to load environment variables from .env file...")
+        if load_dotenv():
+            logger.info(".env file loaded successfully.")
+        else:
+            logger.info("No .env file found or it was empty.")
+    else:
+        logger.info("Optional dependency `python-dotenv` not found. Skipping .env file loading. Install with: pip install python-dotenv")
+
+    # --- API Key Check ---
+    api_key = os.getenv("OPENAI_API_KEY")
+    if not api_key:
+        print("❌ Error: OPENAI_API_KEY environment variable not set.", file=sys.stderr)
+        print("Please set the environment variable before running.", file=sys.stderr)
+        sys.exit(1)
+
+    # --- Argument Parsing (Basic) ---
+    import argparse
+    parser = argparse.ArgumentParser(description="Excel AI Assistant CLI")
+    parser.add_argument(
+        "file_path", # Keep argument for potential future use or direct open, but don't use on startup
+        nargs="?",
+        help="Optional: Path to an Excel workbook (not opened automatically).",
+        default=None,
+    )
+
+    parser.add_argument(
+        "--attach",
+        action="store_true",
+        help="When opening/creating, attempt to attach to an existing running Excel instance.",
+    )
+    parser.add_argument(
+        "--kill-others",
+        action="store_true",
+        help="When opening/creating, attempt to close other running Excel instances first.",
+    )
+    parser.add_argument(
+        "--verbose", "-v",
+        action="store_true",
+        help="Show DEBUG log output in the console in addition to the log file.",
+    )
+    args = parser.parse_args()
+
+    # Adjust console logging based on verbosity
+    if args.verbose:
+        # Set console handler to DEBUG if verbose is requested
+        _console_handler.setLevel(logging.DEBUG)
+        # Ensure handler is attached if it wasn't already
+        root_logger = logging.getLogger()
+        if _console_handler not in root_logger.handlers:
+            root_logger.addHandler(_console_handler)
+        logger.info("Verbose logging to console enabled.")
+    else:
+        # Keep console handler at WARNING level (default)
+        _console_handler.setLevel(logging.WARNING)
+        # Ensure it's attached (might have been removed if toggled)
+        root_logger = logging.getLogger()
+        if _console_handler not in root_logger.handlers:
+            root_logger.addHandler(_console_handler)
+
+
+    print("\033[1m\033[96m🚀 Excel AI Assistant CLI\033[0m") # Bold Cyan Title
+    print("\033[90mType instructions, or use commands: :open <path>, :new, :close, exit\033[0m") # Grey help text
+    print("\033[93m⚠️ No workbook loaded. Use :open <path> or :new to start.\033[0m") # Initial warning
+
+    # --- Initialize Context (without Excel initially) ---
+    excel_manager: Optional[ExcelManager] = None
+    app_context = AppContext(excel_manager=None) # Start with no manager
+
+    # --- Input Loop ---
+    if PROMPT_TOOLKIT_AVAILABLE:
+        session = PromptSession(
+            history=FileHistory(HISTORY_FILE),
+            auto_suggest=AutoSuggestFromHistory(),
+            # Style will be updated dynamically based on workbook state
+        )
+        async def get_input(prompt: str, current_style: Style):
+            return await session.prompt_async(prompt, style=current_style)
+    else:
+        # Fallback: Run synchronous input in a thread
+        # Style needs ANSI codes for fallback
+        async def get_input(prompt: str, current_style: Optional[Style]): # style unused here
+            return await asyncio.to_thread(input, prompt)
+
+    while True:
+        user_input_str = ""
+        try:
+            # Determine prompt style based on whether a workbook is open
+            prompt_prefix = "💬 User: "
+            if PROMPT_TOOLKIT_AVAILABLE:
+                # Use the style map directly with prompt_toolkit
+                prompt_text = prompt_prefix
+                # Determine style key based on workbook state
+                style_key = "prompt" if excel_manager else "prompt.no-workbook"
+                # We pass the whole style object, prompt_toolkit selects the right key
+                current_style = cli_style
+            else:
+                # Apply ANSI codes for fallback
+                prompt_color = "\033[1m\033[96m" if excel_manager else "\033[1m\033[93m" # Cyan if open, Yellow if not
+                prompt_text = f"{prompt_color}{prompt_prefix}\033[0m"
+                current_style = None # Not used by fallback
+
+            user_input_str = await get_input(prompt_text, current_style)
+            user_input_str = user_input_str.strip()
+
+            if not user_input_str:
+                continue
+
+            # --- Command Handling ---
+            if user_input_str.startswith(":"):
+                command_parts = shlex.split(user_input_str[1:])
+                command = command_parts[0].lower() if command_parts else ""
+                cmd_args = command_parts[1:]
+
+                if command == "open":
+                    if not cmd_args:
+                        print("\033[91m❌ Usage: :open <file_path.xlsx>\033[0m")
+                        continue
+                    file_path_to_open = cmd_args[0]
+                    # Ensure path exists or provide feedback
+                    # if not os.path.exists(file_path_to_open):
+                    #     print(f"\033[93m⚠️ File not found: {file_path_to_open}. A new file will be created if possible.\033[0m")
+
+                    print(f"\033[94m🔄 Closing current workbook (if open) and opening '{file_path_to_open}'...\033[0m")
+                    if excel_manager:
+                        try:
+                            await excel_manager.close()
+                            excel_manager = None
+                            app_context.excel_manager = None
+                            app_context.shape = None
+                            app_context.state = {} # Reset state on close/open
+                            app_context.actions = [] # Reset actions
+                        except Exception as e:
+                            print(f"\033[91m❌ Error closing previous workbook: {e}\033[0m")
+                            logger.error(f"Error closing previous workbook: {e}", exc_info=True)
+                            # Continue trying to open the new one
+
+                    try:
+                        excel_manager = ExcelManager(
+                            file_path=file_path_to_open,
+                            visible=True,
+                            attach_existing=args.attach,
+                            kill_others=args.kill_others
+                        )
+                        await excel_manager.open()
+                        app_context.excel_manager = excel_manager
+                        # Perform initial shape scan
+                        try:
+                            shape_updated = app_context.update_shape(tool_name=":open") # Pass context
+                            if shape_updated and app_context.shape: # Check if shape exists
+                                print(f"\033[92m✔️ Workbook '{excel_manager.file_path}' opened successfully (Shape v{app_context.shape.version}).\033[0m")
+                                logger.info(f"Workbook opened via :open. Path: {excel_manager.file_path}. Shape v{app_context.shape.version}")
+                            else:
+                                print(f"\033[93m⚠️ Workbook '{excel_manager.file_path}' opened, but could not get initial shape (may indicate connection issue or empty book).\033[0m")
+                                logger.warning(f"Workbook opened via :open, but initial shape scan failed or returned empty. Path: {excel_manager.file_path}")
+                        except ExcelConnectionError as ce:
+                            print(f"\033[91m❌ Workbook '{excel_manager.file_path}' opened, but connection failed during shape scan: {ce}\033[0m")
+                            logger.error(f"Connection error during shape scan after opening workbook '{excel_manager.file_path}': {ce}")
+                            # Attempt to close the potentially problematic manager
+                            try: await excel_manager.close()
+                            except: pass
+                            excel_manager = None # Ensure manager is None on connection failure
+                            app_context.excel_manager = None
+                            app_context.shape = None
+
+
+                    except ExcelConnectionError as ce:
+                        # Catch connection error during the manager.open() call itself
+                        print(f"\033[91m❌ Failed to establish connection for workbook '{file_path_to_open}': {ce}\033[0m")
+                        logger.error(f"Connection error during ExcelManager.open for '{file_path_to_open}': {ce}", exc_info=True)
+                        excel_manager = None
+                        app_context.excel_manager = None
+                        app_context.shape = None
+                    except Exception as e:
+                        print(f"\033[91m❌ Error opening workbook '{file_path_to_open}': {e}\033[0m")
+                        logger.error(f"Error opening workbook '{file_path_to_open}': {e}", exc_info=True)
+                        excel_manager = None # Ensure manager is None on failure
+                        app_context.excel_manager = None
+                        app_context.shape = None
+
+                elif command == "new":
+                    print("\033[94m🔄 Closing current workbook (if open) and creating a new one...\033[0m")
+                    if excel_manager:
+                        try:
+                            await excel_manager.close()
+                            excel_manager = None
+                            app_context.excel_manager = None
+                            app_context.shape = None
+                            app_context.state = {} # Reset state
+                            app_context.actions = [] # Reset actions
+                        except Exception as e:
+                            print(f"\033[91m❌ Error closing previous workbook: {e}\033[0m")
+                            logger.error(f"Error closing previous workbook: {e}", exc_info=True)
+                            # Continue trying to open the new one
+
+                    try:
+                        excel_manager = ExcelManager(
+                            file_path=None, # No initial path for new
+                            visible=True,
+                            attach_existing=args.attach,
+                            kill_others=args.kill_others
+                        )
+                        await excel_manager.open()
+                        app_context.excel_manager = excel_manager
+                        # Perform initial shape scan
+                        try:
+                            shape_updated = app_context.update_shape(tool_name=":new") # Pass context
+                            if shape_updated and app_context.shape: # Check if shape exists
+                                print(f"\033[92m✔️ New workbook '{excel_manager.file_path}' created successfully (Shape v{app_context.shape.version}).\033[0m")
+                                logger.info(f"New workbook created via :new. Path: {excel_manager.file_path}. Shape v{app_context.shape.version}")
+                            else:
+                                print(f"\033[93m⚠️ New workbook '{excel_manager.file_path}' created, but could not get initial shape (may indicate connection issue or empty book).\033[0m")
+                                logger.warning(f"New workbook created via :new, but initial shape scan failed or returned empty. Path: {excel_manager.file_path}")
+                        except ExcelConnectionError as ce:
+                            print(f"\033[91m❌ New workbook created, but connection failed during shape scan: {ce}\033[0m")
+                            logger.error(f"Connection error during shape scan after creating workbook: {ce}")
+                            # Attempt to close the potentially problematic manager
+                            try: await excel_manager.close()
+                            except: pass
+                            excel_manager = None # Ensure manager is None on connection failure
+                            app_context.excel_manager = None
+                            app_context.shape = None
+
+                    except ExcelConnectionError as ce:
+                        # Catch connection error during the manager.open() call itself
+                        print(f"\033[91m❌ Failed to establish connection for new workbook: {ce}\033[0m")
+                        logger.error(f"Connection error during ExcelManager.open for ':new': {ce}", exc_info=True)
+                        excel_manager = None
+                        app_context.excel_manager = None
+                        app_context.shape = None
+                    except Exception as e:
+                        print(f"\033[91m❌ Error creating new workbook: {e}\033[0m")
+                        logger.error(f"Error creating new workbook: {e}", exc_info=True)
+                        excel_manager = None # Ensure manager is None on failure
+                        app_context.excel_manager = None
+                        app_context.shape = None
+
+                elif command == "close":
+                    if excel_manager:
+                        print("\033[94m🔄 Closing current workbook...\033[0m")
+                        try:
+                            await excel_manager.close()
+                            print("\033[92m✔️ Workbook closed.\033[0m")
+                            logger.info("Workbook closed via :close command.")
+                        except Exception as e:
+                            print(f"\033[91m❌ Error closing workbook: {e}\033[0m")
+                            logger.error(f"Error closing workbook via :close: {e}", exc_info=True)
+                        finally:
+                            excel_manager = None
+                            app_context.excel_manager = None
+                            app_context.shape = None
+                            app_context.state = {} # Reset state
+                            app_context.actions = [] # Reset actions
+                            print("\033[93m⚠️ No workbook loaded. Use :open <path> or :new to start.\033[0m")
+                    else:
+                        print("\033[93m⚠️ No workbook is currently open.\033[0m")
+
+                elif command.lower() in ["exit", "quit"]:
+                    break # Exit CLI loop
+
+                elif command == "clear":
+                    # Basic clear screen (might not work on all terminals)
+                    print("\033[H\033[J", end="")
+
+                elif command == "help":
+                    print("\nAvailable commands:")
+                    print("  :open <path>  - Close current workbook and open/create one at <path>.")
+                    print("  :new          - Close current workbook and create a new blank one.")
+                    print("  :close        - Close the current workbook.")
+                    print("  :shape        - Show the current workbook structure known to the agent.")
+                    print("  :clear        - Clear the terminal screen.")
+                    print("  :help         - Show this help message.")
+                    print("  exit / quit   - Exit the CLI.")
+                    print("Enter Excel instructions directly otherwise.")
+
+                elif command == "shape":
+                    if app_context.shape:
+                        from .agent_core import _format_workbook_shape # Use the formatter
+                        shape_str = _format_workbook_shape(app_context.shape)
+                        print("\n\033[94mCurrent Workbook Shape:\033[0m")
+                        print(shape_str)
+                    elif app_context.excel_manager:
+                        print("\033[93m⚠️ Workbook is open, but shape information is not available (try running an instruction or check logs).\033[0m")
+                    else:
+                        print("\033[93m⚠️ No workbook open to show shape.\033[0m")
+
+                else:
+                    print(f"\033[91m❌ Unknown command: ':{command}'. Type ':help' for options.\033[0m")
+
+            # --- Regular Instruction Handling ---
+            elif user_input_str.lower() in ["exit", "quit"]:
+                break
+            else:
+                # Check if workbook is open before running agent
+                if not excel_manager or not excel_manager.book:
+                    print("\033[93m⚠️ Please open or create a workbook first using ':open <path>' or ':new'.\033[0m")
+                    continue
+
+                # Run the agent with the user input using the streaming function
+                await run_agent_streamed(
+                    excel_assistant_agent,
+                    user_input_str,
+                    app_context
+                )
+
+        except EOFError: # Handle Ctrl+D
+            break
+        except KeyboardInterrupt: # Handle Ctrl+C during input prompt
+            print("\n\033[93mUse 'exit' or 'quit' to leave. (Ctrl+C cancels current operation)\033[0m")
+            continue # Continue loop after Ctrl+C during input
+        except Exception as e:
+            print(f"\n\033[91m❌ Error in CLI loop: {e}\033[0m")
+            logger.error("Error in main CLI loop", exc_info=True)
+            # Optional: break or continue
+
+    # --- Cleanup ---
+    if excel_manager:
+        print("\n\033[94m👋 Closing active workbook before exiting...\033[0m")
+        try:
+            await excel_manager.close()
+        except Exception as e:
+            logger.error(f"Error during final cleanup close: {e}", exc_info=True)
+
+    print("\n\033[96m👋 Exiting Excel AI Assistant. Goodbye!\033[0m")
+
+
+# --- Entry Point ---
 if __name__ == "__main__":
     try:
         asyncio.run(main())
     except KeyboardInterrupt:
-        console.print("\nExiting.")
+        print("\n\033[93m🚫 Exiting due to user interrupt.\033[0m")
         sys.exit(0)
+    except Exception as e:
+        logger.critical(f"CLI critical error during startup/shutdown: {e}", exc_info=True)
+        print(f"\n\033[91m❌ Critical Error: {e}\033[0m", file=sys.stderr)
+        sys.exit(1)
