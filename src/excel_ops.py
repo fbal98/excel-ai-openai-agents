@@ -805,8 +805,8 @@ class ExcelManager:
                 continue # Skip this sheet on error
 
         # 2. Scan named ranges
+        shape.names = {} # Initialize names dict
         try:
-            shape.names = {} # Initialize names dict
             for name_obj in book.names:
                 nm = name_obj.name
                 try:
@@ -817,23 +817,24 @@ class ExcelManager:
                         # Get the full address including sheet name if possible
                         addr = refers_range.address.replace("$", "")
                         shape.names[nm] = addr
+                        logger.debug(f"Resolved named range '{nm}' to address '{addr}'")
                     else:
-                        # If refers_to_range fails (e.g., constant, complex formula), store raw string
-                        refers_to_str = name_obj.refers_to
-                        logger.warning(f"Could not resolve address for named range '{nm}' (refers_to='{refers_to_str}'). Storing refers_to string.")
+                        # If refers_to_range fails (e.g., constant, complex formula, or error), store raw string
+                        refers_to_str = getattr(name_obj, 'refers_to', '#REF!') # Get raw string safely
+                        # Log as DEBUG not WARNING, as the name likely exists but resolution failed.
+                        logger.debug(f"Could not resolve address for named range '{nm}' (refers_to='{refers_to_str}'). Storing raw refers_to string in shape.")
                         shape.names[nm] = refers_to_str
-
                 except Exception as name_ref_err:
                     # Handle other errors during resolution, store raw string
-                    refers_to_str = getattr(name_obj, 'refers_to', 'Error retrieving refers_to')
-                    logger.warning(f"Error resolving named range '{nm}' (refers_to='{refers_to_str}'): {name_ref_err}. Storing refers_to string.")
+                    refers_to_str = getattr(name_obj, 'refers_to', '#REF!') # Get raw string safely
+                    # Log as DEBUG not WARNING
+                    logger.debug(f"Error resolving named range '{nm}' (refers_to='{refers_to_str}'): {name_ref_err}. Storing raw refers_to string in shape.")
                     shape.names[nm] = refers_to_str
-
         except Exception as names_err:
-            logger.error(f"Error accessing named ranges: {names_err}. Skipping named ranges in shape.")
+            logger.error(f"Error accessing named ranges collection: {names_err}. Skipping named ranges in shape.")
             shape.names = {} # Ensure names is an empty dict on error
             # Continue without names if there's a general error
-
+    
         shape.version = 0 # Base version, caller (AppContext) will manage incrementing
         return shape
 
@@ -1553,13 +1554,27 @@ class ExcelManager:
             try:
                 if table_range.merge_cells:
                     logger.warning(f"Target range {table_address} contains merged cells. Table insertion might fail or behave unexpectedly.")
+
                 # Check for overlapping tables (ListObjects) - requires iterating existing tables
-                for lo in sheet.api.ListObjects:
-                    lo_range = sheet.range(lo.Range.Address)
-                    # Basic intersection check (can be refined)
-                    # if table_range.api.Column <= lo_range.last_cell.api.Column and ... (complex check)
-                    pass # Skipping complex overlap check for now
+                # Wrap ListObjects access in its own try-except
+                try:
+                    if hasattr(sheet.api, 'ListObjects'): # Check if property exists first
+                         for lo in sheet.api.ListObjects:
+                             try: # Protect against errors querying individual table properties
+                                 lo_range = sheet.range(lo.Range.Address)
+                                 # Basic intersection check (can be refined)
+                                 # if table_range.api.Column <= lo_range.last_cell.api.Column and ... (complex check)
+                                 logger.debug(f"Found existing table '{lo.Name}' at {lo.Range.Address}. Overlap check not fully implemented.")
+                             except Exception as single_lo_err:
+                                logger.debug(f"Could not query details of an existing ListObject during pre-check: {single_lo_err}")
+                             pass # Skipping complex overlap check for now
+                    else:
+                        logger.debug("ListObjects property not found on sheet.api, skipping table overlap check.")
+                except Exception as list_objects_access_err:
+                     logger.warning(f"Could not access sheet.api.ListObjects during pre-check (likely unsupported): {list_objects_access_err}")
+
             except Exception as overlap_check_err:
+                # Catch other potential errors during pre-check (e.g., merge_cells check)
                 logger.warning(f"Could not perform pre-check for overlaps: {overlap_check_err}")
 
             # --- Write header and data ---
@@ -1572,42 +1587,48 @@ class ExcelManager:
 
             # --- Create the ListObject ---
             logger.debug(f"Attempting to add ListObject to range {table_address}...")
-            # Constants for ListObjects.Add: SourceType=xlSrcRange(1), Range, LinkSource, XlListObjectHasHeaders=xlYes(1)
-            xlYes = 1 # xw.constants.XlYesNoGuess.xlYes
-            xlSrcRange = 1 # xw.constants.ListObjectSourceType.xlSrcRange
-            # Use xw.Range object's API for the range parameter
-            # Try using ListObjects, fallback if not supported
+            lo = None # Initialize lo to None
             try:
+                # Constants for ListObjects.Add: SourceType=xlSrcRange(1), Range, LinkSource, XlListObjectHasHeaders=xlYes(1)
+                xlYes = 1 # xw.constants.XlYesNoGuess.xlYes
+                xlSrcRange = 1 # xw.constants.ListObjectSourceType.xlSrcRange
                 lo = sheet.api.ListObjects.Add(SourceType=xlSrcRange, Source=table_range.api, XlListObjectHasHeaders=xlYes)
-                logger.debug("ListObject added.")
+                logger.debug("ListObject added successfully.")
+
+                # --- Set Table Name and Style (Only if ListObject creation succeeded) ---
+                if table_name:
+                    try:
+                        # Check if name already exists (more robust check needed if lo could be None earlier)
+                        name_exists = False
+                        for existing_lo in sheet.api.ListObjects:
+                             # Check name and avoid comparing against itself if lo is valid
+                            if existing_lo.Name == table_name and (lo is None or existing_lo.Range.Address != lo.Range.Address):
+                                name_exists = True
+                                break
+                        if name_exists:
+                           logger.warning(f"Table name '{table_name}' already exists on sheet '{sheet_name}'. Using default name.")
+                           # Optionally generate a unique name here instead of relying on default
+                        else:
+                            logger.debug(f"Setting table name to '{table_name}'.")
+                            lo.Name = table_name
+                    except Exception as name_err:
+                        logger.warning(f"Failed to set table name to '{table_name}': {name_err}. Using default name.")
+
+                if table_style:
+                    try:
+                        logger.debug(f"Setting table style to '{table_style}'.")
+                        lo.TableStyle = table_style
+                    except Exception as style_err:
+                        # Make warning more specific if style application failed vs table name
+                        logger.warning(f"Failed to set table style to '{table_style}': {style_err}.")
+
             except Exception as table_api_err:
-                logger.warning(f"Could not create ListObject (unsupported on this Excel version?). Error: {table_api_err}")
-                lo = None
-            # --- Set Table Name and Style ---
-            if table_name:
-                try:
-                    # Check if name already exists
-                    name_exists = False
-                    for existing_lo in sheet.api.ListObjects:
-                        if existing_lo.Name == table_name and existing_lo.Range.Address != lo.Range.Address:
-                            name_exists = True
-                            break
-                    if name_exists:
-                        logger.warning(f"Table name '{table_name}' already exists on sheet '{sheet_name}'. Using default name.")
-                    else:
-                        logger.debug(f"Setting table name to '{table_name}'.")
-                        lo.Name = table_name
-                except Exception as name_err:
-                    logger.warning(f"Failed to set table name to '{table_name}': {name_err}. Using default name.")
+                # If ListObject creation failed, log clearly but don't raise an error here
+                # The data has already been written.
+                logger.warning(f"Could not create formal Excel Table (ListObject) for range {table_address} (Unsupported on this Excel version/OS or other error). Data written as plain range. Error: {table_api_err}")
+                # lo remains None, so subsequent name/style setting is skipped implicitly
 
-            if table_style:
-                try:
-                    logger.debug(f"Setting table style to '{table_style}'.")
-                    lo.TableStyle = table_style
-                except Exception as style_err:
-                    logger.warning(f"Failed to set table style to '{table_style}': {style_err}.")
-
-            # (Optional) Attempt an autofit
+            # (Optional) Attempt an autofit on the written range (even if not a formal table)
             # Safe to skip if not supported
             try:
                 table_range.columns.autofit()

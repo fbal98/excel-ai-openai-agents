@@ -1,6 +1,7 @@
-openai-agents
+openai-agents[litellm] # Use extras install for native integration
 openpyxl
 python-dotenv
+litellm # Keep litellm for cost calculation utils etc.
 
 # Realtime single‑char keyboard input (Win / *nix)
 getchlib>=0.3.1

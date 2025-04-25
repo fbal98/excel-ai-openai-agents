@@ -157,32 +157,38 @@ class SummaryHooks(AgentHooks):
             )
 
         # ── Self‑regulation: abort on repeated failures ──────────────────
-        is_err = not ok  # Use the result of _is_result_ok
+        is_failure = not ok # Use the result of _is_result_ok to determine actual failure
         error_msg = ""
-        tool_result = _ensure_toolresult(result)  # Ensure we have ToolResult format
+        tool_result = _ensure_toolresult(result) # Ensure we have ToolResult format
 
-        if is_err:
-            # Access 'error' from the standardized tool_result dictionary
+        # Extract error message ONLY if it was an actual failure
+        if is_failure:
             error_msg = tool_result.get("error", f"Operation failed with result: {result}")
-
-        if is_err:
-            key = (tool_name, error_msg)
-            if key == app_ctx.last_error_key and error_msg:  # Only count consecutive if error msg is same
+            logger.debug(f"Tool '{tool_name}' failed. Error: {error_msg}. Consecutive count: {app_ctx.consecutive_errors + 1}")
+            key = (tool_name, error_msg) # Key includes tool name and specific error msg
+            # Increment counter only if the *same tool* fails with the *same error message* consecutively
+            if key == app_ctx.last_error_key and error_msg:
                 app_ctx.consecutive_errors += 1
             else:
+                # Different tool failed, or different error from the same tool, reset counter to 1
                 app_ctx.consecutive_errors = 1
-                app_ctx.last_error_key = key
+                app_ctx.last_error_key = key # Update the last error key
         else:
-            # Any successful tool call resets the error loop completely
-            app_ctx.consecutive_errors = 0
-            app_ctx.last_error_key = ("", "")  # Reset key
+             # Any successful tool call resets the error loop completely
+             if app_ctx.consecutive_errors > 0:
+                 logger.debug(f"Successful tool '{tool_name}' reset consecutive error count from {app_ctx.consecutive_errors}.")
+             app_ctx.consecutive_errors = 0
+             app_ctx.last_error_key = ("", "") # Reset key
 
+        # Check if the consecutive error limit has been exceeded AFTER potentially incrementing
         if app_ctx.consecutive_errors > MAX_CONSECUTIVE_ERRORS:
+            # Retrieve the error message associated with the last_error_key that triggered the limit
+            last_fail_tool, last_fail_msg = app_ctx.last_error_key
             logger.error(
-                f"Aborting run: Tool '{tool_name}' failed {app_ctx.consecutive_errors} times consecutively with error: {error_msg}"
+                f"Aborting run: Tool '{last_fail_tool}' failed {app_ctx.consecutive_errors} times consecutively with the same error: {last_fail_msg}"
             )
             # Raise specific exception rather than generic RuntimeError
-            from agents.exceptions import MaxTurnsExceeded  # Or a more specific error if available
+            from agents.exceptions import MaxTurnsExceeded # Or a more specific error if available
             raise MaxTurnsExceeded(
-                f"Aborting run: Tool '{tool_name}' failed {app_ctx.consecutive_errors} times consecutively."
+                 f"Aborting run: Tool '{last_fail_tool}' failed {app_ctx.consecutive_errors} times consecutively."
             )

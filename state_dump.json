@@ -1,51 +1,317 @@
 {
   "shape": {
     "sheets": {
-      "google DCB": "A1:H4",
+      "Regional_Analysis": "A1:E10",
+      "Sales_Summary": "A1:E8",
       "Sheet1": "A1:A1"
     },
     "headers": {
-      "google DCB": [
-        "Task",
-        "Start Date",
-        "Duration (days)",
-        "1.0",
-        "2.0",
-        "3.0",
-        "4.0",
-        "5.0"
+      "Regional_Analysis": [],
+      "Sales_Summary": [
+        "Product"
       ],
       "Sheet1": []
     },
-    "names": {},
-    "version": 3
+    "names": {
+      "_xlfn.AVERAGEIF": "=#NAME?",
+      "SalesDataTable": "=\"Sales_Summary!$A$2:$E$7\""
+    },
+    "version": 10
   },
   "state": {
-    "summary": "create_sheet_tool \u2192 ok\nset_table_tool \u2192 ok\nset_range_style_tool \u2192 ok\nset_range_style_tool \u2192 ok"
+    "current_sheet": "Regional_Analysis"
   },
   "actions": [
     {
+      "tool": "get_sheet_names_tool",
+      "args": {},
+      "result": {
+        "success": true,
+        "data": [
+          "Sheet1"
+        ],
+        "error": null
+      },
+      "ok": true
+    },
+    {
+      "tool": "get_range_values_tool",
+      "args": {},
+      "result": {
+        "success": true,
+        "data": [
+          [
+            null,
+            null,
+            null,
+            null,
+            null
+          ]
+        ],
+        "error": null
+      },
+      "ok": true
+    },
+    {
       "tool": "create_sheet_tool",
       "args": {},
-      "result": true,
+      "result": {
+        "success": true,
+        "data": "Sales_Summary",
+        "error": null
+      },
+      "ok": true
+    },
+    {
+      "tool": "insert_table_tool",
+      "args": {},
+      "result": {
+        "success": true,
+        "error": null
+      },
+      "ok": true
+    },
+    {
+      "tool": "set_range_formula_tool",
+      "args": {},
+      "result": {
+        "success": true,
+        "error": null
+      },
+      "ok": true
+    },
+    {
+      "tool": "set_range_style_tool",
+      "args": {},
+      "result": {
+        "success": true,
+        "error": null
+      },
+      "ok": true
+    },
+    {
+      "tool": "set_range_style_tool",
+      "args": {},
+      "result": {
+        "success": true,
+        "error": null
+      },
+      "ok": true
+    },
+    {
+      "tool": "set_column_width_tool",
+      "args": {},
+      "result": {
+        "success": true,
+        "error": null
+      },
+      "ok": true
+    },
+    {
+      "tool": "set_column_width_tool",
+      "args": {},
+      "result": {
+        "success": true,
+        "error": null
+      },
+      "ok": true
+    },
+    {
+      "tool": "set_column_width_tool",
+      "args": {},
+      "result": {
+        "success": true,
+        "error": null
+      },
+      "ok": true
+    },
+    {
+      "tool": "set_column_width_tool",
+      "args": {},
+      "result": {
+        "success": true,
+        "error": null
+      },
+      "ok": true
+    },
+    {
+      "tool": "set_column_width_tool",
+      "args": {},
+      "result": {
+        "success": true,
+        "error": null
+      },
+      "ok": true
+    },
+    {
+      "tool": "merge_cells_range_tool",
+      "args": {},
+      "result": {
+        "success": true,
+        "error": null
+      },
+      "ok": true
+    },
+    {
+      "tool": "set_cell_value_tool",
+      "args": {},
+      "result": {
+        "success": true,
+        "error": null
+      },
+      "ok": true
+    },
+    {
+      "tool": "set_range_style_tool",
+      "args": {},
+      "result": {
+        "success": true,
+        "error": null
+      },
+      "ok": true
+    },
+    {
+      "tool": "set_named_ranges_tool",
+      "args": {},
+      "result": "An error occurred while running the tool. Please try again. Error: Invalid JSON input for tool set_named_ranges_tool: 1 validation error for set_named_ranges_tool_args\nmapping\n  Field required [type=missing, input_value={}, input_type=dict]\n    For further information visit https://errors.pydantic.dev/2.11/v/missing",
+      "ok": true
+    },
+    {
+      "tool": "set_named_ranges_tool",
+      "args": {},
+      "result": {
+        "success": true,
+        "error": null
+      },
+      "ok": true
+    },
+    {
+      "tool": "create_sheet_tool",
+      "args": {},
+      "result": {
+        "success": true,
+        "data": "Regional_Analysis",
+        "error": null
+      },
       "ok": true
     },
     {
       "tool": "set_table_tool",
       "args": {},
-      "result": true,
+      "result": {
+        "success": true,
+        "error": null
+      },
       "ok": true
     },
     {
       "tool": "set_range_style_tool",
       "args": {},
-      "result": true,
+      "result": {
+        "success": true,
+        "error": null
+      },
+      "ok": true
+    },
+    {
+      "tool": "get_range_values_tool",
+      "args": {},
+      "result": {
+        "success": true,
+        "data": [
+          [
+            "Region"
+          ],
+          [
+            "North"
+          ],
+          [
+            "South"
+          ],
+          [
+            "North"
+          ],
+          [
+            "West"
+          ],
+          [
+            "East"
+          ]
+        ],
+        "error": null
+      },
+      "ok": true
+    },
+    {
+      "tool": "set_rows_tool",
+      "args": {},
+      "result": {
+        "success": true,
+        "error": null
+      },
+      "ok": true
+    },
+    {
+      "tool": "set_range_formula_tool",
+      "args": {},
+      "result": {
+        "success": true,
+        "error": null
+      },
+      "ok": true
+    },
+    {
+      "tool": "set_range_formula_tool",
+      "args": {},
+      "result": {
+        "success": true,
+        "error": null
+      },
       "ok": true
     },
     {
       "tool": "set_range_style_tool",
       "args": {},
-      "result": true,
+      "result": {
+        "success": true,
+        "error": null
+      },
+      "ok": true
+    },
+    {
+      "tool": "set_range_style_tool",
+      "args": {},
+      "result": {
+        "success": true,
+        "error": null
+      },
+      "ok": true
+    },
+    {
+      "tool": "set_columns_widths_tool",
+      "args": {},
+      "result": {
+        "success": true,
+        "error": null
+      },
+      "ok": true
+    },
+    {
+      "tool": "set_cell_formula_tool",
+      "args": {},
+      "result": {
+        "success": true,
+        "error": null
+      },
+      "ok": true
+    },
+    {
+      "tool": "insert_table_tool",
+      "args": {},
+      "result": {
+        "success": true,
+        "error": null
+      },
       "ok": true
     }
   ]
