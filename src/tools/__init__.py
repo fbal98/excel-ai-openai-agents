@@ -1,6 +1,7 @@
 # src/tools/__init__.py
 import inspect
 import sys
+import logging
 
 # Import individual tool functions from their respective modules
 from .core_defs import (
@@ -79,7 +80,8 @@ for _name, _obj in _all_members:
 # Apply the wrapper to the identified tool functions
 for _name, _func in _unwrapped_tools:
     setattr(_current_module, _name, _wrap_tool_result(_func))
-    print(f"[DEBUG] Applied ToolResult wrapper to: {_name}")
+    # Use logger instead of print to allow control via log levels
+    logging.getLogger(__name__).debug(f"Applied ToolResult wrapper to: {_name}")
 
 
 # --- Explicitly define __all__ for export ---

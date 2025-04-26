@@ -1018,56 +1018,93 @@ class ExcelManager:
             # Borders
             # Note: Applying individual borders is complex and error-prone with xlwings/COM across platforms.
             # Using rng.api.BorderAround is often more reliable for simple outlines.
-            # Implementing full openpyxl-style border dict support is non-trivial here.
             if "border" in style and isinstance(style["border"], dict):
                 border_style_dict = style["border"]
                 try:
-                    # Simplified: Apply outline border if specified
-                    # TODO: Add more granular border handling if necessary, potentially with platform checks
-                    outline_spec = border_style_dict.get("outline") # Could be True or a dict with style/color
-                    border_to_apply = None
-
-                    # Determine border based on presence and type of 'outline' or individual sides
+                    # -- Define style mappings --
+                    # Map style name to BorderWeight enum/value
+                    weight_map = {
+                        # String names
+                        "thin": BorderWeight.thin,            # 2  
+                        "medium": BorderWeight.medium,        # -4138
+                        "thick": BorderWeight.thick,          # 4
+                        "hairline": BorderWeight.hairline,    # 1
+                        "heavy": BorderWeight.heavy,          # -4138 (same as medium)
+                        # Direct integers (for compatibility)
+                        "1": BorderWeight.hairline,           # 1
+                        "2": BorderWeight.thin,               # 2
+                        "4": BorderWeight.thick,              # 4
+                        # Default to thin for unknown values
+                    }
+                    
+                    line_style_map = { # Map to LineStyle
+                        # Default to continuous for most weights
+                        "thin": LineStyle.continuous,         # 1
+                        "medium": LineStyle.continuous,      
+                        "thick": LineStyle.continuous,
+                        "hairline": LineStyle.continuous,
+                        "heavy": LineStyle.continuous,
+                        # Additional styles if needed:
+                        "dashed": LineStyle.dashed,           # -4115
+                        "dotted": LineStyle.dot,              # -4118
+                        "double": LineStyle.double,           # -4119
+                        # Direct integers (for compatibility)
+                        "1": LineStyle.continuous,  # continuous
+                        "-4115": LineStyle.dashed,  # dashed
+                        "-4118": LineStyle.dot,     # dotted
+                        "-4119": LineStyle.double,  # double
+                    }
+                    
+                    # -- Handle outline vs individual sides --
+                    # First check for outline specification
+                    outline_spec = border_style_dict.get("outline")
                     if outline_spec:
-                        border_to_apply = outline_spec if isinstance(outline_spec, dict) else {} # Use empty dict if True
-                    elif any(side in border_style_dict for side in ["left", "right", "top", "bottom"]):
-                        # If individual sides are present but outline is not, maybe apply a default outline?
-                        # Or attempt individual edges (complex)? For now, let's prioritize 'outline'.
-                        # If we want a default outline when sides are specified but outline isn't:
-                        # border_to_apply = border_style_dict.get("left", border_style_dict.get("top", {})) # Use style from one side
-                        logger.debug(f"Individual border sides specified for {range_address} but 'outline' not set. Outline border not applied by default.")
-                        pass # Or attempt complex edge logic here
-
-                    if border_to_apply is not None:
+                        # Handle outline border (either True or a dict with style/color)
+                        border_to_apply = outline_spec if isinstance(outline_spec, dict) else {}
                         border_style = str(border_to_apply.get("style", "thin")).lower() # Default thin
                         color_argb = border_to_apply.get("color", "FF000000") # Default black
-
-                        # Map style name to BorderWeight enum/value
-                        weight_map = {
-                            "thin": BorderWeight.thin,    # 2
-                            "medium": BorderWeight.medium, # -4138
-                            "thick": BorderWeight.thick,   # 4
-                            # Add other openpyxl styles if needed (hair, dotted, dashed etc. need LineStyle mapping too)
-                        }
-                        line_style_map = { # Map to LineStyle (only continuous for now)
-                            "thin": LineStyle.continuous,
-                            "medium": LineStyle.continuous,
-                            "thick": LineStyle.continuous,
-                            # Add mappings for dashed, dotted etc. if supporting them
-                        }
-
+                        
+                        # Normalize border style to Excel constants
                         xl_weight = weight_map.get(border_style, BorderWeight.thin)
                         xl_linestyle = line_style_map.get(border_style, LineStyle.continuous)
-                        # Note: _to_bgr is now imported from core_defs
                         xl_color = _to_bgr(color_argb) # Convert color
-
-                        # Use BorderAround for outline
+                        
+                        # Apply outline border
                         rng.api.BorderAround(
                             LineStyle=xl_linestyle,
                             Weight=xl_weight,
                             Color=xl_color
                         )
                         logger.debug(f"Applied outline border ({border_style}, {color_argb}) to {range_address}")
+                    
+                    # Handle individual borders if specified
+                    sides = {"left": 7, "right": 10, "top": 8, "bottom": 9}  # Excel border position constants
+                    
+                    for side_name, border_idx in sides.items():
+                        if side_name in border_style_dict:
+                            side_spec = border_style_dict[side_name]
+                            if not isinstance(side_spec, dict):
+                                continue  # Skip if not a dict with style/color
+                                
+                            # Extract style info for this side
+                            side_style = str(side_spec.get("style", "thin")).lower()  # Default thin
+                            side_color = side_spec.get("color", "FF000000")  # Default black
+                            
+                            # Normalize to Excel constants
+                            side_weight = weight_map.get(side_style, BorderWeight.thin)
+                            side_linestyle = line_style_map.get(side_style, LineStyle.continuous)
+                            side_color_val = _to_bgr(side_color)
+                            
+                            # Apply the individual border
+                            try:
+                                # Get the Borders collection and apply to specific index
+                                border_obj = rng.api.Borders(border_idx)
+                                border_obj.LineStyle = side_linestyle
+                                border_obj.Weight = side_weight
+                                border_obj.Color = side_color_val
+                                logger.debug(f"Applied {side_name} border ({side_style}, {side_color}) to {range_address}")
+                            except Exception as side_err:
+                                logger.warning(f"Failed to apply {side_name} border to {range_address}: {side_err}")
 
                 except ValueError as ve: # Catch specific color format error
                     logger.warning(f"Style Error ({range_address}): Invalid border color format: {ve}")
@@ -1332,13 +1369,59 @@ class ExcelManager:
 
         try:
             src_rng = src_sheet.range(src_range)
-            dst_rng_anchor = dst_sheet.range(dst_anchor).cells[0] # Ensure destination is top-left cell
+            dst_rng = dst_sheet.range(dst_anchor)
+            
+            # Safely get the destination top-left cell without assuming .cells attribute
+            # First try accessing cells directly, but fall back to the range itself if needed
+            try:
+                # Try the normal approach first (works in most xlwings versions)
+                if hasattr(dst_rng, "cells") and len(dst_rng.cells) > 0:
+                    dst_rng_anchor = dst_rng.cells[0]
+                    logger.debug(f"Using cells[0] for destination anchor at {dst_rng_anchor.address}")
+                else:
+                    # If .cells isn't available, use the range itself (for single cell)
+                    dst_rng_anchor = dst_rng
+                    logger.debug(f"Using range directly for destination anchor at {dst_rng_anchor.address}")
+            except Exception as cell_err:
+                # Fallback to using the range itself if any access issue with .cells
+                logger.debug(f"Falling back to direct range for anchor due to: {cell_err}")
+                dst_rng_anchor = dst_rng
 
             opts = paste_opts.lower()
-            logger.debug(f"Copying from {src_sheet_name}!{src_range} to {dst_sheet_name}!{dst_rng_anchor.address} with option '{opts}'")
+            logger.debug(f"Copying from {src_sheet_name}!{src_range} to {dst_sheet_name}!{dst_anchor} with option '{opts}'")
 
             # Use API Copy/PasteSpecial for more control and reliability
-            src_rng.api.Copy()
+            try:
+                src_rng.api.Copy()
+            except Exception as copy_err:
+                logger.warning(f"Direct Copy() API call failed: {copy_err}. Attempting alternative approach...")
+                
+                # Fallback for non-COM environments: manual copy of values
+                if opts == "values":
+                    # Get source values and calculate target range dimensions
+                    src_values = src_rng.value
+                    if not isinstance(src_values, list):
+                        # Handle single cell case
+                        src_values = [[src_values]]
+                    elif src_values and not isinstance(src_values[0], list):
+                        # Handle 1D list (single row or column)
+                        if src_rng.shape[0] == 1:
+                            # Single row
+                            src_values = [src_values]
+                        else:
+                            # Single column
+                            src_values = [[v] for v in src_values]
+                    
+                    # Write values directly
+                    rows = len(src_values)
+                    cols = len(src_values[0]) if rows > 0 and src_values[0] else 0
+                    dst_range = dst_sheet.range(dst_anchor).resize(rows, cols)
+                    dst_range.value = src_values
+                    logger.info(f"Fallback: Manual copy of values from {src_sheet_name}!{src_range} to {dst_sheet_name}!{dst_anchor}")
+                    return  # Exit early after using fallback approach
+                else:
+                    # Re-raise for other paste types that need COM copy/paste
+                    raise copy_err
 
             paste_type_map = {
                 "all": PasteType.all, # -4104, xlPasteAll
@@ -1352,34 +1435,58 @@ class ExcelManager:
 
             if opts in paste_type_map:
                 xl_paste_option = paste_type_map[opts]
-                # For column widths, destination range doesn't matter as much, it applies to the columns intersecting the anchor
-                if opts == "column_widths":
+                
+                try:
+                    # Try PasteSpecial API call
                     dst_rng_anchor.api.PasteSpecial(Paste=xl_paste_option)
-                else:
-                    # For other types, PasteSpecial applies to the destination anchor
-                    dst_rng_anchor.api.PasteSpecial(Paste=xl_paste_option)
+                except Exception as paste_err:
+                    logger.warning(f"PasteSpecial API call failed: {paste_err}. Attempting fallback...")
+                    
+                    # Fallback for specific paste types
+                    if opts == "values":
+                        # Try direct value assignment if API paste fails
+                        src_values = src_rng.value
+                        if src_values is not None:
+                            # Ensure we have target range with correct dimensions
+                            if isinstance(src_values, list):
+                                rows = len(src_values)
+                                if rows > 0 and isinstance(src_values[0], list):
+                                    cols = len(src_values[0])
+                                else:
+                                    # Single row or not a list
+                                    if src_rng.shape[0] == 1:
+                                        # It's a single row
+                                        rows, cols = 1, len(src_values)
+                                        src_values = [src_values]
+                                    else:
+                                        # It's a single column
+                                        rows, cols = len(src_values), 1
+                                        src_values = [[v] for v in src_values]
+                            else:
+                                # Single cell value
+                                rows, cols = 1, 1
+                                src_values = [[src_values]]
+                                
+                            # Resize destination range and assign values
+                            dst_range = dst_sheet.range(dst_anchor).resize(rows, cols)
+                            dst_range.value = src_values
+                            logger.info(f"Fallback: Manual assignment of values for {rows}x{cols} range")
+                        else:
+                            logger.warning("Source range value is None, nothing to paste")
+                    else:
+                        # No fallback available for other paste types
+                        raise paste_err
             else:
-                # Fallback or simplified handling for basic options if API fails or for custom needs
-                # Note: These might be less efficient or lose fidelity compared to PasteSpecial
-                if opts == "values": # Already handled by map, but could be a fallback
-                    # rows = src_rng.rows.count
-                    # cols = src_rng.columns.count
-                    # dst_rng = dst_rng_anchor.resize(rows, cols)
-                    # dst_rng.value = src_rng.value # Direct value assignment
-                    logger.warning(f"Paste option '{opts}' fell back from API (should not happen).")
-                elif opts == "formulas": # Already handled by map
-                    # rows = src_rng.rows.count
-                    # cols = src_rng.columns.count
-                    # dst_rng = dst_rng_anchor.resize(rows, cols)
-                    # dst_rng.formula = src_rng.formula
-                    logger.warning(f"Paste option '{opts}' fell back from API (should not happen).")
-                else:
-                    logger.error(f"Invalid paste_opts '{paste_opts}'. Use one of: {list(paste_type_map.keys())}")
-                    raise ValueError(f"Invalid paste_opts '{paste_opts}'.")
+                # Handle invalid paste option
+                logger.error(f"Invalid paste_opts '{paste_opts}'. Use one of: {list(paste_type_map.keys())}")
+                raise ValueError(f"Invalid paste_opts '{paste_opts}'.")
 
             # Clear clipboard marquee (optional, cosmetic)
-            if self.app:
-                self.app.api.CutCopyMode = False
+            try:
+                if self.app:
+                    self.app.api.CutCopyMode = False
+            except Exception as clear_err:
+                logger.debug(f"Could not clear copy mode: {clear_err}")
 
         except Exception as e:
             logger.error(f"Failed to copy/paste range: {e}")
@@ -1660,6 +1767,7 @@ class ExcelManager:
         """
         Appends rows to an existing Excel table using COM ListRows.Add for incremental inserts.
         Ensures row data width matches table width.
+        Falls back to plain range append if ListObjects are not supported in the environment.
         """
         sheet = self._require_sheet(sheet_name) # Ensures connection and sheet exists
         logger = logging.getLogger(__name__)
@@ -1669,6 +1777,21 @@ class ExcelManager:
             return
 
         logger.info(f"Appending {len(rows)} rows to table '{table_name}' on sheet '{sheet_name}'.")
+        
+        # Check if this environment supports ListObjects
+        supports_listobjects = True
+        try:
+            # Try to access ListObjects property - this will fail on platforms without COM support
+            # or older Excel versions
+            hasattr(sheet.api, 'ListObjects')
+        except Exception as env_check_err:
+            supports_listobjects = False
+            logger.warning(f"This environment doesn't appear to support Excel tables (ListObjects): {env_check_err}. Using plain range append fallback.")
+        
+        # If ListObjects not supported, use fallback approach immediately
+        if not supports_listobjects:
+            return self._append_table_rows_fallback(sheet_name, table_name, rows)
+        
         try:
             # Locate the table (ListObject) by name using the sheet's API
             tbl = None
@@ -1676,23 +1799,46 @@ class ExcelManager:
                 # Accessing ListObjects by name might raise if not found
                 tbl = sheet.api.ListObjects(table_name)
                 logger.debug(f"Found table '{table_name}' via direct access.")
-            except Exception:
-                # Fallback: Iterate if direct access fails (e.g., older Excel versions?)
+            except Exception as direct_err:
+                # Check if this is a "property not found" error indicating no ListObjects support
+                if "property" in str(direct_err).lower() and "not found" in str(direct_err).lower():
+                    logger.warning(f"ListObjects property not found: {direct_err}. Using plain range append fallback.")
+                    return self._append_table_rows_fallback(sheet_name, table_name, rows)
+                    
+                # Otherwise try alternate access method
                 logger.debug(f"Direct access to table '{table_name}' failed, iterating...")
-                for lo in sheet.api.ListObjects:
-                    if lo.Name == table_name:
-                        tbl = lo
-                        logger.debug(f"Found table '{table_name}' via iteration.")
-                        break
+                try:
+                    for lo in sheet.api.ListObjects:
+                        if lo.Name == table_name:
+                            tbl = lo
+                            logger.debug(f"Found table '{table_name}' via iteration.")
+                            break
+                except Exception as iter_err:
+                    logger.warning(f"Cannot iterate ListObjects: {iter_err}. Using plain range append fallback.")
+                    return self._append_table_rows_fallback(sheet_name, table_name, rows)
 
             if tbl is None:
+                # Try to find a named range with this table name before giving up
+                try:
+                    for name in self.book.names:
+                        if name.name == table_name:
+                            logger.info(f"Found '{table_name}' as a named range instead of table. Using plain range append.")
+                            return self._append_table_rows_fallback(sheet_name, table_name, rows, named_range=name)
+                except Exception as name_err:
+                    logger.debug(f"Error checking for named range: {name_err}")
+                    
+                # If we reach here, we couldn't find the table or named range
                 logger.error(f"Table '{table_name}' not found on sheet '{sheet_name}'")
                 raise KeyError(f"Table '{table_name}' not found on sheet '{sheet_name}'")
 
             # Get table dimensions
-            num_table_cols = tbl.ListColumns.Count
-            table_range_addr = tbl.Range.Address
-            logger.debug(f"Target table '{table_name}' found at {table_range_addr} with {num_table_cols} columns.")
+            try:
+                num_table_cols = tbl.ListColumns.Count
+                table_range_addr = tbl.Range.Address
+                logger.debug(f"Target table '{table_name}' found at {table_range_addr} with {num_table_cols} columns.")
+            except Exception as table_dim_err:
+                logger.warning(f"Could not get table dimensions: {table_dim_err}. Using plain range append fallback.")
+                return self._append_table_rows_fallback(sheet_name, table_name, rows, table_obj=tbl)
 
             # --- Append rows one by one using ListRows.Add ---
             # This is generally safer for tables with formulas or special formatting
@@ -1709,6 +1855,13 @@ class ExcelManager:
                         new_listrow = tbl.ListRows.Add(AlwaysInsert=True)
                     except TypeError: # Handle if AlwaysInsert arg is not supported
                         new_listrow = tbl.ListRows.Add()
+                    except Exception as add_err:
+                        # If adding row fails with COM error, fall back to direct append for this and remaining rows
+                        logger.warning(f"ListRows.Add() failed: {add_err}. Switching to plain range append for remaining rows.")
+                        # Get current row count and append the rest of the rows manually
+                        remaining_rows = rows[i:]
+                        return self._append_table_rows_fallback(sheet_name, table_name, remaining_rows, 
+                                                              table_obj=tbl, already_added=added_count)
 
                     # Get the range corresponding to the new row
                     new_row_range = sheet.range(new_listrow.Range.Address.replace('$', ''))
@@ -1720,24 +1873,200 @@ class ExcelManager:
 
                 except Exception as row_add_err:
                     logger.error(f"Failed to append row {i+1} to table '{table_name}': {row_add_err}")
-                    # Decide whether to stop or continue
-                    # raise  # Stop on first error
-                    continue # Log and continue
+                    # Continue with next row
+                    continue
 
             logger.info(f"Successfully appended {added_count}/{len(rows)} rows to table '{table_name}'.")
-
-            # Refresh calculation if needed (optional)
-            # try:
-            #     logger.debug("Requesting calculation update after appending rows.")
-            #     self.app.calculate()
-            # except Exception as calc_err:
-            #     logger.warning(f"Calculation update failed: {calc_err}")
+            return  # Success case
 
         except KeyError as ke:
             raise ke # Re-raise KeyErrors (table not found)
         except Exception as e:
             logger.error(f"Failed to append rows to table '{table_name}': {e}")
-            raise RuntimeError(f"Failed to append rows to table '{table_name}': {e}") from e
+            # Try fallback before giving up completely
+            try:
+                logger.warning(f"Attempting fallback method for appending rows to '{table_name}'")
+                return self._append_table_rows_fallback(sheet_name, table_name, rows)
+            except Exception as fallback_err:
+                logger.error(f"Fallback method also failed: {fallback_err}")
+                raise RuntimeError(f"Failed to append rows to table '{table_name}': {e}") from e
+                
+    def _append_table_rows_fallback(self, sheet_name: str, table_name: str, rows: List[List[Any]], 
+                                   table_obj=None, named_range=None, already_added: int = 0) -> None:
+        """
+        Fallback implementation to append rows when ListObjects API is not available.
+        Works with plain ranges instead of formal Excel tables.
+        
+        Args:
+            sheet_name: Sheet containing the table/range
+            table_name: Name of the table/range
+            rows: List of rows to append
+            table_obj: Optional table object if already found
+            named_range: Optional named range if found
+            already_added: Number of rows already added (for reporting)
+        """
+        sheet = self._require_sheet(sheet_name)  # Ensures connection and sheet exists
+        logger = logging.getLogger(__name__)
+        
+        if not rows:
+            logger.debug("No rows to append in fallback method")
+            return
+            
+        # 1. Identify the target range where the "table" data is
+        target_range_addr = None
+        
+        # Case 1: We have a table object
+        if table_obj is not None:
+            try:
+                target_range_addr = table_obj.Range.Address
+                logger.debug(f"Using table object range: {target_range_addr}")
+            except Exception as tbl_addr_err:
+                logger.warning(f"Could not get table range address: {tbl_addr_err}")
+                
+        # Case 2: We have a named range
+        if target_range_addr is None and named_range is not None:
+            try:
+                target_range_addr = named_range.refers_to_range.address
+                logger.debug(f"Using named range: {target_range_addr}")
+            except Exception as name_addr_err:
+                logger.warning(f"Could not get named range address: {name_addr_err}")
+                
+        # Case 3: Search for the range by table name in existing ranges
+        if target_range_addr is None:
+            # Try various methods to find the range
+            try:
+                # Check named ranges
+                for name in self.book.names:
+                    if name.name == table_name:
+                        try:
+                            target_range_addr = name.refers_to_range.address
+                            logger.debug(f"Found table as named range: {target_range_addr}")
+                            break
+                        except Exception:
+                            pass
+            except Exception as names_err:
+                logger.debug(f"Error searching named ranges: {names_err}")
+                
+            # Check for a range with header text matching table_name
+            if target_range_addr is None:
+                logger.warning(f"Table '{table_name}' not found as a formal table or named range. Searching for header text...")
+                # This is a more aggressive fallback - search for table-like data with headers
+                try:
+                    used_range = sheet.used_range
+                    # Look for table headers in row 1
+                    header_row = sheet.range('1:1').value
+                    if isinstance(header_row, list):
+                        # Check if any header cell contains the table name
+                        for idx, cell_val in enumerate(header_row):
+                            if cell_val and table_name.lower() in str(cell_val).lower():
+                                # Found a likely header - determine table range
+                                col_letter = get_column_letter(idx + 1)
+                                last_row = used_range.last_cell.row
+                                target_range_addr = f"{col_letter}1:{col_letter}{last_row}"
+                                logger.debug(f"Found potential table by header text at column {col_letter}")
+                                break
+                except Exception as header_search_err:
+                    logger.debug(f"Error during header search: {header_search_err}")
+        
+        # If we still don't have a range, we can't proceed
+        if target_range_addr is None:
+            raise KeyError(f"Could not locate table or range '{table_name}' for append operation")
+            
+        # 2. Determine the number of columns and last row of the target range
+        try:
+            # Get the range object
+            target_range = sheet.range(target_range_addr)
+            
+            # Determine column count from target range
+            if hasattr(target_range, 'columns') and hasattr(target_range.columns, 'count'):
+                num_cols = target_range.columns.count
+            else:
+                # Alternative: calculate from address
+                if ':' in target_range_addr:
+                    try:
+                        # Attempt to parse A1:B10 format
+                        start_addr, end_addr = target_range_addr.split(':')
+                        start_col = coordinate_from_string(start_addr.replace('$', ''))[0]
+                        end_col = coordinate_from_string(end_addr.replace('$', ''))[0]
+                        start_col_idx = column_index_from_string(start_col)
+                        end_col_idx = column_index_from_string(end_col)
+                        num_cols = end_col_idx - start_col_idx + 1
+                    except Exception:
+                        # Guess based on first row values
+                        first_row_vals = target_range.value
+                        if isinstance(first_row_vals, list) and len(first_row_vals) > 0:
+                            if isinstance(first_row_vals[0], list):
+                                num_cols = len(first_row_vals[0])
+                            else:
+                                num_cols = len(first_row_vals)
+                        else:
+                            num_cols = 1  # Default if all else fails
+                else:
+                    num_cols = 1  # Single cell range
+            
+            # Find the last row of the table
+            if hasattr(target_range, 'rows') and hasattr(target_range.rows, 'count'):
+                current_row_count = target_range.rows.count
+            else:
+                # Parse from address
+                if ':' in target_range_addr:
+                    try:
+                        # Parse A1:B10 format
+                        _, end_addr = target_range_addr.split(':')
+                        end_row = coordinate_from_string(end_addr.replace('$', ''))[1]
+                        current_row_count = end_row
+                    except Exception:
+                        # Fallback - get values and count rows
+                        vals = target_range.value
+                        if isinstance(vals, list):
+                            if isinstance(vals[0], list):
+                                current_row_count = len(vals)
+                            else:
+                                current_row_count = 1
+                        else:
+                            current_row_count = 1
+                else:
+                    current_row_count = 1  # Single cell
+            
+            # Get the starting range coordinates
+            if ':' in target_range_addr:
+                start_addr = target_range_addr.split(':')[0].replace('$', '')
+            else:
+                start_addr = target_range_addr.replace('$', '')
+            
+            start_col_letter = coordinate_from_string(start_addr)[0]
+            start_col_idx = column_index_from_string(start_col_letter)
+            
+            logger.debug(f"Target range '{table_name}' has {num_cols} columns and {current_row_count} rows")
+            
+            # 3. Normalize and append each row
+            successful_appends = 0
+            for i, row_vals in enumerate(rows):
+                try:
+                    # Normalize the row data to match table width
+                    normalized_row = _normalise_rows([None]*num_cols, [row_vals])[0]  # Use dummy header
+                    
+                    # Calculate the destination cell
+                    next_row_num = current_row_count + 1 + i  # +1 because we append after the last row
+                    append_cell = f"{start_col_letter}{next_row_num}"
+                    
+                    # Create a range for the new row
+                    row_range = sheet.range(append_cell).resize(1, num_cols)
+                    
+                    # Write the values
+                    row_range.value = normalized_row
+                    successful_appends += 1
+                    
+                except Exception as append_err:
+                    logger.error(f"Failed to append row {i+1} in fallback method: {append_err}")
+                    continue
+            
+            logger.info(f"Fallback method: Successfully appended {successful_appends}/{len(rows)} rows " +
+                      f"({already_added + successful_appends} total) to '{table_name}' using plain range append")
+            
+        except Exception as e:
+            logger.error(f"Fallback append operation failed: {e}")
+            raise RuntimeError(f"Could not append rows to '{table_name}' using either method: {e}") from e
 
 
 # --------------------------------------------------------------------------

@@ -1,109 +1,16 @@
 # Test Plan
 
----
+### Batch 1: Basic Operations
+- **Prompt:** 
+  Write "Hello world" to Sheet1!A1. Create a new sheet called Data. On "Data" put the headers Name, Age, City in A1:C1 and add three rows of dummy values. Bold the header row on "Data" and auto-size those three columns to fit.
+- **Expected Outcome:** Sheet1!A1 shows "Hello world". New "Data" sheet with headers and 3 rows of data in A1:C4. Headers bold and columns A-C auto-sized.
 
-### Test Case 1
-- **Prompt:**  
-  Write “Hello world” to Sheet1!A1
-- **Expected Outcome:**  
-  Cell A1 on Sheet1 shows **Hello world**; nothing else touched.
+### Batch 2: Table Operations and Formatting
+- **Prompt:** 
+  Insert a formatted Excel table on "Data" starting A6 with headers Sales, Q1, Q2, Q3, Q4 and two rows of sample numbers. Add a "Total" column right of that table that sums Q1:Q4 per row and then add a Total Row that sums the Total column. Merge cells A1:D1 on Sheet1 and center the text "Annual Report". Copy-paste values of Data!A1:C4 into Sheet1 starting at A5. Color the header row of the Data table light blue (ARGB FFD9E1F2) and add thin outside borders.
+- **Expected Outcome:** Table in Data!A6:F8 with Total column and row. Sheet1!A1:D1 merged with centered "Annual Report". Sheet1!A5:C8 contains values from Data!A1:C4. Data table header row light blue with thin borders.
 
----
-
-### Test Case 2
-- **Prompt:**  
-  Create a new sheet called Data
-- **Expected Outcome:**  
-  A new tab named **Data** appears at the end.
-
----
-
-### Test Case 3
-- **Prompt:**  
-  On “Data” put the headers Name, Age, City in A1:C1 and add three rows of dummy values
-- **Expected Outcome:**  
-  Range A1:C4 filled (1 header + 3 rows); existing cells remain intact.
-
----
-
-### Test Case 4
-- **Prompt:**  
-  Bold the header row on “Data” and auto-size those three columns to fit
-- **Expected Outcome:**  
-  Row 1 bold; columns A–C widen (≈15‑25 pt).
-
----
-
-### Test Case 5
-- **Prompt:**  
-  Insert a formatted Excel table on “Data” starting A6 with headers Sales, Q1, Q2, Q3, Q4 and two rows of sample numbers
-- **Expected Outcome:**  
-  ListObject table appears in A6:E8; default style; no totals row yet.
-
----
-
-### Test Case 6
-- **Prompt:**  
-  Add a “Total” column right of that table that sums Q1:Q4 per row and then add a Total Row that sums the Total column
-- **Expected Outcome:**  
-  Column F labeled **Total** with formulas; totals row shows grand total.
-
----
-
-### Test Case 7
-- **Prompt:**  
-  Merge cells A1:D1 on Sheet1 and center the text “Annual Report”
-- **Expected Outcome:**  
-  A1:D1 merged & centered; rest of Sheet1 unchanged.
-
----
-
-### Test Case 8
-- **Prompt:**  
-  Copy-paste values of Data!A1:C4 into Sheet1 starting at A5
-- **Expected Outcome:**  
-  Block appears at Sheet1!A5:C8; pure values, no formatting brought over.
-
----
-
-### Test Case 9
-- **Prompt:**  
-  Color the header row of the Data table light blue (ARGB FFD9E1F2) and add thin outside borders
-- **Expected Outcome:**  
-  Table headers show light-blue fill; thin border frames header cells only.
-
----
-
-### Test Case 10
-- **Prompt:**  
-  Create a named range TotalSales that refers to the Total column of the Data table (exclude the header)
-- **Expected Outcome:**  
-  Name **TotalSales** maps to numeric cells under Total; check Name Manager.
-
----
-
-### Test Case 11
-- **Prompt:**  
-  Append 50 synthetic rows to the Data table with random names and numbers 1‑100 in Q1–Q4
-- **Expected Outcome:**  
-  Table grows by 50 rows; Total column auto-fills; Grand Total updates.
-
----
-
-### Test Case 12
-- **Prompt:**  
-  Generate a pivot table on new sheet “Summary” showing Total per Name
-- **Expected Outcome:**  
-  New **Summary** sheet with pivot: Names as rows, “Sum of Total” values.
-
-Write “Hello world” to Sheet1!A1
-  Create a new sheet called Data
-    On “Data” put the headers Name, Age, City in A1:C1 and add three rows of dummy values
-  Bold the header row on “Data” and auto-size those three columns to fit
-
-
-
-
-  Insert a formatted Excel table on “Data” starting A6 with headers Sales, Q1, Q2, Q3, Q4 and two rows of sample numbers
-    Add a “Total” column right of that table that sums Q1:Q4 per row and then add a Total Row that sums the Total column
-  Merge cells A1:D1 on Sheet1 and center the text “Annual Report”
+### Batch 3: Advanced Operations
+- **Prompt:** 
+  Create a named range TotalSales that refers to the Total column of the Data table (exclude the header). Append 50 synthetic rows to the Data table with random names and numbers 1‑100 in Q1–Q4. Generate a pivot table on new sheet "Summary" showing Total per Name.
+- **Expected Outcome:** Named range "TotalSales" for Total column (excluding header). Data table extended by 50 rows with random data. New "Summary" sheet with pivot table of Total per Name.

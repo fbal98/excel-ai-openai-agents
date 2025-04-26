@@ -30,3 +30,6 @@ tasks/
 state_dump.json
 venv
 .venv
+.excel_ai_history
+excel_outputs
+agents-sdk-docs

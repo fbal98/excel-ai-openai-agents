@@ -5,6 +5,7 @@ Agent‑level hooks for memory, progressive‑summary, and workbook shape tracki
 from __future__ import annotations
 
 import logging
+import re
 from typing import Any, Dict, Optional
 
 from agents import Agent, AgentHooks, RunContextWrapper, Tool, FunctionTool, Usage
@@ -24,21 +25,31 @@ from .tools.core_defs import _ensure_toolresult, ToolResult
 
 def _is_result_ok(res: Any) -> bool: 
     """
-    Treat everything as success unless it explicitly signals failure.
+    Examine result to determine if it indicates success, failure, or warning.
+    
+    This function strictly enforces the ToolResult format with explicit success/failure indicators.
 
     Success:
-        • res is a dict with {"success": True}
-        • res is a dict with no "error"
-        • res is any non‑dict value (None, str, list, int, …)
-
+        • res is a dict with {"success": True} (explicit success)
+    
     Failure:
-        • res is a dict containing a truthy "error"
-        • res is dict with {"success": False}
+        • res is a dict with {"success": False} (explicit failure)
+    
+    Any result that doesn't conform to the ToolResult format will be normalized first.
+    Non-dict returns (None, str, list, etc.) are converted to {"success": True, "data": res}
     """
-    # Ensure res is converted to ToolResult format first
+    # First, ensure res is properly normalized to ToolResult format
     tool_result = _ensure_toolresult(res)
-    # Now check the 'success' key, defaulting to True if somehow missing (though _ensure should add it)
-    return tool_result.get("success", True)
+    
+    # Explicitly check for success/failure based on the 'success' key
+    # This requires tools to explicitly signal their status
+    if "success" in tool_result:
+        return bool(tool_result["success"])
+    
+    # If we reach here, something went wrong with _ensure_toolresult
+    # Log a warning since this shouldn't happen after normalization
+    logger.warning(f"Result missing 'success' key after normalization: {res}. Assuming failure.")
+    return False  # Safer to assume failure if status is unclear
 
 
 def append_summary_line(app_ctx: "AppContext", line: str, max_lines: int = 15) -> None:
@@ -165,14 +176,24 @@ class SummaryHooks(AgentHooks):
         if is_failure:
             error_msg = tool_result.get("error", f"Operation failed with result: {result}")
             logger.debug(f"Tool '{tool_name}' failed. Error: {error_msg}. Consecutive count: {app_ctx.consecutive_errors + 1}")
-            key = (tool_name, error_msg) # Key includes tool name and specific error msg
-            # Increment counter only if the *same tool* fails with the *same error message* consecutively
-            if key == app_ctx.last_error_key and error_msg:
+            
+            # Extract core error message by removing variable parts
+            # This helps match similar errors with slight differences
+            core_error = self._extract_core_error(error_msg)
+            error_key = (tool_name, core_error)  # Use tool name + core error as the key
+            
+            # Check if this is the same type of error as the previous one
+            last_tool, last_core_error = getattr(app_ctx, "last_error_key", ("", ""))
+            
+            # Check if error is similar to previous error (same tool, similar error message)
+            if tool_name == last_tool and core_error == last_core_error and core_error:
                 app_ctx.consecutive_errors += 1
+                logger.debug(f"Consecutive error count increased to {app_ctx.consecutive_errors} for tool '{tool_name}'")
             else:
-                # Different tool failed, or different error from the same tool, reset counter to 1
+                # Different tool failed or different error, reset counter to 1
                 app_ctx.consecutive_errors = 1
-                app_ctx.last_error_key = key # Update the last error key
+                app_ctx.last_error_key = error_key # Update the error key
+                logger.debug(f"New error type detected, reset consecutive error count to 1 for tool '{tool_name}'")
         else:
              # Any successful tool call resets the error loop completely
              if app_ctx.consecutive_errors > 0:
@@ -183,12 +204,63 @@ class SummaryHooks(AgentHooks):
         # Check if the consecutive error limit has been exceeded AFTER potentially incrementing
         if app_ctx.consecutive_errors > MAX_CONSECUTIVE_ERRORS:
             # Retrieve the error message associated with the last_error_key that triggered the limit
-            last_fail_tool, last_fail_msg = app_ctx.last_error_key
+            last_fail_tool, last_fail_core_error = app_ctx.last_error_key
             logger.error(
-                f"Aborting run: Tool '{last_fail_tool}' failed {app_ctx.consecutive_errors} times consecutively with the same error: {last_fail_msg}"
+                f"Aborting run: Tool '{last_fail_tool}' failed {app_ctx.consecutive_errors} times consecutively with similar errors."
             )
             # Raise specific exception rather than generic RuntimeError
             from agents.exceptions import MaxTurnsExceeded # Or a more specific error if available
             raise MaxTurnsExceeded(
-                 f"Aborting run: Tool '{last_fail_tool}' failed {app_ctx.consecutive_errors} times consecutively."
+                 f"Aborting run: Tool '{last_fail_tool}' failed {app_ctx.consecutive_errors} times consecutively with similar errors."
             )
+            
+    def _extract_core_error(self, error_msg: str) -> str:
+        """
+        Extract the core part of an error message by removing variable elements.
+        This helps match similar errors that differ only in specific details.
+        
+        Examples:
+        - "Sheet 'Sales' not found" -> "Sheet not found"
+        - "Cannot find cell A3" -> "Cannot find cell"
+        - "File 'data.xlsx' not found" -> "File not found"
+        
+        Args:
+            error_msg: The full error message
+            
+        Returns:
+            A simplified error message with variable parts removed
+        """
+        if not error_msg:
+            return ""
+            
+        # Common patterns to normalize
+        common_patterns = [
+            # Replace quoted names
+            (r"'[^']*'", "'NAME'"),
+            (r'"[^"]*"', "'NAME'"),
+            
+            # Replace cell references
+            (r"\b[A-Z]+\d+\b", "CELL"),
+            (r"\b[A-Z]+\d+:[A-Z]+\d+\b", "RANGE"),
+            
+            # Replace numbers
+            (r"\b\d+\b", "NUM"),
+            
+            # Replace paths
+            (r"(?:/[^/\s]+)+", "PATH"),
+            (r"(?:\\[^\\]+)+", "PATH"),
+        ]
+        
+        # Apply each pattern
+        normalized = error_msg
+        for pattern, replacement in common_patterns:
+            normalized = re.sub(pattern, replacement, normalized)
+            
+        # Trim whitespace and convert to lowercase for better matching
+        normalized = normalized.strip().lower()
+        
+        # If normalization removed too much, use first 30 chars of original
+        if len(normalized) < 5 and len(error_msg) > 0:
+            return error_msg[:30].strip().lower()
+            
+        return normalized

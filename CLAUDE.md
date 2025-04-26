@@ -40,3 +40,5 @@ AI agent using `xlwings` to modify Excel workbooks based on natural language. Fe
 ## Known Issues & Solutions
 
 * **Excel Workbook Comparison**: In `ExcelManager.__aenter__` (`excel_ops.py`), never compare workbook objects directly (`wb != self.book`). Instead, compare workbook names to avoid "Object does not exist" errors (macOS). Always check `len(app.books)` before accessing any workbook. This prevents OSERROR -1728.
+
+* **Border Styles**: When using border styles in `set_range_style_tool` or similar functions, specify border styles as strings that match Excel's constants. Valid border styles include "thin", "medium", "thick", "hairline", "dashed", "dotted", and "double". For individual borders, structure as `{"border": {"left": {"style": "thin", "color": "FF0000FF"}, ...}}`. The codebase properly maps these string values to Excel's internal constants.
