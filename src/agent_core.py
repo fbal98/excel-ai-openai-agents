@@ -1,7 +1,7 @@
 import logging
 from typing import Optional, Tuple, Any # Added Tuple, Any
 
-from agents import Agent, function_tool, FunctionTool, RunContextWrapper, Runner, Usage, RunResultBase # Added Runner, Usage, RunResultBase
+from agents import Agent, function_tool, FunctionTool, RunContextWrapper, Runner, Usage, RunResult # Added Runner, Usage, RunResult
 # Import all tools from the new tools package via its __init__.py
 # This imports all functions/classes listed in src.tools.__all__
 from . import tools as excel_tools
@@ -398,8 +398,24 @@ async def run_and_cost(
         model_name_used = None
         if hasattr(agent, 'model') and isinstance(agent.model, str):
             model_name_used = agent.model
+            logger.info(f"Found model name in agent.model: '{model_name_used}'")
         else:
-            logger.warning(f"Agent model attribute is not a string: {type(agent.model)}. Cannot determine model name for costing.")
+            # Enhanced logging to better understand the structure
+            logger.warning(f"Agent model attribute is not a string: {type(agent.model)}. Value: {agent.model}")
+            
+            # Try harder to get the model name - inspect agent attributes
+            for attr_name in dir(agent):
+                if attr_name.startswith('_'):
+                    continue
+                try:
+                    attr_value = getattr(agent, attr_name)
+                    logger.debug(f"Agent attr '{attr_name}': {type(attr_value)}")
+                    if isinstance(attr_value, str) and "gemini" in attr_value.lower():
+                        model_name_used = attr_value
+                        logger.info(f"Found potential model name in agent.{attr_name}: '{model_name_used}'")
+                        break
+                except Exception:
+                    pass
 
 
         if not model_name_used:
@@ -425,10 +441,10 @@ async def run_and_cost(
         logger.warning("Cannot store cost/usage in context.state (context missing 'state' dict).")
 
     # Append the raw result messages (user input + assistant output) to the history
-    from agents.results import RunResultBase # Moved import here
+    from agents.results import RunResult # Moved import here
     from .conversation_context import ConversationContext # Import the new helper
 
-    if isinstance(res, RunResultBase):
+    if isinstance(res, RunResult):
         ctx_msgs: list = context.state.setdefault("conversation_history", [])
         # Use res.new_items which contains the actual generated items (tool calls, outputs, messages)
         # instead of res.to_input_list() which might include the initial input again.

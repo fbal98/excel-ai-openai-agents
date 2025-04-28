@@ -11,6 +11,11 @@ import os
 from agents import Usage
 from litellm import completion_cost # Use litellm function
 
+# Override rates for special Gemini SKU:
+EXTRA_RATES = {
+    "gemini-2.5-flash-preview-04-17": (0.000075 / 1000, 0.00030 / 1000),
+}
+
 # Import helper to get config, avoiding direct dependency on active state module if possible
 # However, we might need the model name string associated with the run.
 from .model_config import get_provider_config, get_active_provider
@@ -81,18 +86,40 @@ def dollars_for_usage(usage: Usage, model_name_from_agent: str | None = None) ->
     prompt_tokens = getattr(usage, "input_tokens", 0) or 0
     completion_tokens = getattr(usage, "output_tokens", 0) or 0
 
-    # Determine the model name to use for litellm costing
-    # Pass the name directly from the agent instance
-    model_for_costing = get_model_name_for_costing(model_name_from_agent=model_name_from_agent)
+    # Determine the initial model name to use for litellm costing
+    raw_model_name = get_model_name_for_costing(model_name_from_agent=model_name_from_agent)
 
-    if not model_for_costing:
+    if not raw_model_name:
         logger.error("Could not determine model name for cost calculation.")
         return 0.0
+
+    # Handle model name formatting for litellm cost calculation
+    model_for_costing = raw_model_name
+    
+    # Special handling for Gemini models
+    if "gemini" in raw_model_name.lower():
+        # For Gemini models, litellm might need the full model name
+        # Check if the name is already prefixed
+        if '/' in raw_model_name and "gemini" in raw_model_name.lower():
+            parts = raw_model_name.split('/')
+            if len(parts) > 1:
+                # Extract just the model name without provider prefix
+                model_for_costing = parts[-1]
+                logger.debug(f"Using Gemini model name '{model_for_costing}' for litellm costing.")
+        logger.debug(f"Using Gemini model format for costing: '{model_for_costing}'")
+    # Handle other models with prefixes
+    elif '/' in raw_model_name:
+        parts = raw_model_name.split('/')
+        if len(parts) > 1:
+            model_for_costing = parts[-1] # Take the last part after the last '/'
+            logger.debug(f"Stripped provider prefix from '{raw_model_name}', using '{model_for_costing}' for litellm costing.")
+        else:
+             logger.warning(f"Model name '{raw_model_name}' contains '/' but couldn't extract base name properly. Using original.")
 
     logger.debug(f"Calculating cost for model: '{model_for_costing}' (Input: {prompt_tokens}, Output: {completion_tokens})")
 
     try:
-        # Use litellm.completion_cost
+        # Use litellm.completion_cost with the potentially stripped name
         cost = completion_cost(
             model=model_for_costing,
             prompt_tokens=prompt_tokens,
@@ -102,9 +129,23 @@ def dollars_for_usage(usage: Usage, model_name_from_agent: str | None = None) ->
         # completion_cost returns None if model pricing is not found
         if cost is None:
              logger.warning(f"LiteLLM could not find pricing data for model '{model_for_costing}'. Cost assumed to be $0.00.")
+             # Additional debugging for Gemini models since they often have pricing issues
+             if "gemini" in model_for_costing.lower():
+                 logger.warning(f"Gemini model pricing not found. Common issue with newer Gemini models in litellm.")
+                 # Try a fallback pricing calculation for Gemini models
+                 try:
+                    # Approximation based on published rates for Gemini models
+                    # These rates might need adjustment based on actual pricing
+                    input_rate = 0.000125 / 1000  # $0.000125 per 1K input tokens
+                    output_rate = 0.000375 / 1000  # $0.000375 per 1K output tokens
+                    cost = (prompt_tokens * input_rate) + (completion_tokens * output_rate)
+                    logger.info(f"Used fallback pricing for Gemini model: ${cost:.6f}")
+                    return round(cost, 6)
+                 except Exception as e:
+                    logger.error(f"Fallback pricing calculation failed: {e}")
              return 0.0
 
-        logger.debug(f"Calculated cost via litellm: ${cost:.6f}")
+        logger.info(f"Calculated cost via litellm: ${cost:.6f}")
         return round(cost, 6) # Sane default precision: micro-dollar resolution
 
     except Exception as e:

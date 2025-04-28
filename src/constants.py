@@ -4,7 +4,8 @@ import os
 
 # Flag controlling whether cost information is displayed by the CLI.
 # Read-only everywhere – set the environment variable OPENAI_SHOW_COST=0 to mute.
-SHOW_COST = os.getenv("OPENAI_SHOW_COST", "1") == "1"
+# Explicitly force to True for now to debug cost calculation issues
+SHOW_COST = True
 
 WRITE_TOOLS = {
     "open_workbook_tool",

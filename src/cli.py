@@ -317,6 +317,53 @@ async def run_agent_streamed(agent: Agent, user_input: str, ctx: AppContext) -> 
     """
     Runs the agent using run_streamed, printing events as they appear.
     """
+    from .model_config import get_active_provider
+
+    # Check if current provider is gemini; if so, fallback to non-streamed run to avoid JSONDecodeError
+    if get_active_provider() == "gemini":
+        # Fallback to non-streamed calls
+        # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+        current_user_message = {"role": "user", "content": user_input}
+        conversation_history = ctx.state.get("conversation_history", [])
+        if not isinstance(conversation_history, list):
+            conversation_history = []
+        input_data = conversation_history + [current_user_message]
+
+        print("\033[90m(Using non-streaming run for Gemini)\033[0m")
+        # Directly call Runner.run
+        try:
+            result_run = await Runner.run(agent, input=input_data, context=ctx)
+
+            # Cost/Usage logic for fallback
+            usage = getattr(ctx, "usage", None)
+            if usage and hasattr(agent, "model"):
+                from .costs import dollars_for_usage
+                cost_val = dollars_for_usage(usage, model_name_from_agent=agent.model)
+                total_tokens = (usage.input_tokens or 0) + (usage.output_tokens or 0)
+                ctx.state["last_run_cost"] = cost_val
+                ctx.state["last_run_usage"] = {
+                    "input_tokens": usage.input_tokens or 0,
+                    "output_tokens": usage.output_tokens or 0,
+                    "total_tokens": total_tokens,
+                    "model_name": agent.model,
+                }
+
+            # Print final output if any
+            if result_run and result_run.final_output:
+                msg = str(result_run.final_output).strip()
+                if msg:
+                    print(f"\n\033[92m✔️ 🤖 Agent: {msg}\033[0m")
+            return None  # We didn't produce a streaming result
+
+        except Exception as e:
+            print(f"\033[91m❌ Unexpected error (Gemini fallback): {e}\033[0m")
+            logger.error("Error in gemini fallback path", exc_info=True)
+            return None
+
+    # If not gemini, proceed with streaming.
+    """
+    Runs the agent using run_streamed, printing events as they appear.
+    """
     if not ctx.excel_manager or not ctx.excel_manager.book:
         print("\n\033[93m⚠️ No active workbook. Use '/open <path>' or '/new' first.\033[0m")
         return None
@@ -411,13 +458,18 @@ async def run_agent_streamed(agent: Agent, user_input: str, ctx: AppContext) -> 
                 ctx.state["conversation_history"] = ctx.state.get("conversation_history", [])
 
         # Info logs after the run
-        if SHOW_COST and "last_run_cost" in ctx.state:
-            cost = ctx.state.get("last_run_cost", 0.0)
-            usage_info = ctx.state.get("last_run_usage", {})
-            tokens = usage_info.get("total_tokens", "N/A")
-            model_used = usage_info.get("model_name", "N/A")
-            cost_style = "\033[90m\033[3m"
-            print(f"{cost_style}💰 Cost: ${cost:.4f} ({tokens} tokens, Model: {model_used})\033[0m", file=sys.stderr)
+        if SHOW_COST:
+            if "last_run_cost" in ctx.state:
+                cost = ctx.state.get("last_run_cost", 0.0)
+                usage_info = ctx.state.get("last_run_usage", {})
+                tokens = usage_info.get("total_tokens", "N/A")
+                model_used = usage_info.get("model_name", "N/A")
+                cost_style = "\033[90m\033[3m"
+                print(f"{cost_style}💰 Cost: ${cost:.4f} ({tokens} tokens, Model: {model_used})\033[0m", file=sys.stderr)
+            else:
+                # Debug output to identify why costs might not be showing
+                logger.warning("SHOW_COST is True but 'last_run_cost' not found in context state")
+                print("\033[93m⚠️ Cost info missing. Check logs for details.\033[0m", file=sys.stderr)
 
         return result_stream
 
@@ -676,8 +728,21 @@ async def main():
                     usage = app_context.state.get("last_run_usage", {})
                     tokens = usage.get("total_tokens", "N/A")
                     used_model = usage.get("model_name", get_active_provider())
+                    
+                    # Debug output of all state variables to help troubleshoot
+                    logger.debug(f"State contents: {', '.join(app_context.state.keys())}")
+                    if "usage" in app_context.state:
+                        logger.debug(f"Usage details in state: {app_context.state['usage']}")
+                    
                     if c is None:
                         print("\033[93mNo cost info yet.\033[0m")
+                        print("\033[93mActive provider: " + get_active_provider() + "\033[0m")
+                        
+                        # Show any usage stats that might be available directly
+                        if hasattr(app_context, 'usage') and app_context.usage:
+                            input_tokens = getattr(app_context.usage, "input_tokens", 0) or 0
+                            output_tokens = getattr(app_context.usage, "output_tokens", 0) or 0
+                            print(f"\033[93mFound usage directly on context: Input={input_tokens}, Output={output_tokens}\033[0m")
                     else:
                         print(f"\033[94mCost: ${c:.4f} ({tokens} tokens, Model: {used_model})\033[0m")
 

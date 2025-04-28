@@ -3,7 +3,7 @@ from __future__ import annotations
 import copy
 import difflib, json, logging, tiktoken
 from typing import Any, Dict, List, Literal, Optional, TYPE_CHECKING
-from agents import RunResultBase # NEW – required by update_history_from_result
+from agents import RunResult # Changed to RunResult as per the error message
 
 if TYPE_CHECKING:
     from .context import AppContext, WorkbookShape # Avoid circular import
