@@ -1241,47 +1241,101 @@ class ExcelManager:
     #  Merge / unmerge
     # --------------------------------------------------------------------------
     def merge_cells_range(self, sheet_name: str, range_address: str) -> None:
-        """Merge cells in the specified range."""
-        sheet = self._require_sheet(sheet_name) # Ensures connection and sheet exists
-        logger = logging.getLogger(__name__)
-        try:
-            rng = sheet.range(range_address)
-            # Check if already merged (optional, can prevent errors sometimes)
-            # if rng.merge_area.address == rng.address and rng.count > 1: # Check if it's *already* merged
-            #     logger.debug(f"Range {sheet_name}!{range_address} is already merged.")
-            #     return
+        """Merge cells in *range_address* with macOS-safe fallbacks.
 
-            logger.debug(f"Merging range: {sheet_name}!{range_address}")
-            rng.merge() # Use xlwings method, should handle API differences
-            # Alternative API call: sheet.range(range_address).api.Merge()
-        except Exception as e:
-            logger.error(f"Failed to merge cells {sheet_name}!{range_address}: {e}")
-            # Consider if this should raise or just log
-            raise # Let's raise for now so the tool knows it failed
+        Excel on macOS occasionally throws ``OSERROR: -50 (Parameter error)``
+        when the high-level ``Range.merge()`` helper is used, even for valid
+        ranges.  We:
+
+        1. Skip work if the area is already merged.
+        2. Attempt the normal `rng.merge()`.
+        3. If that fails, *unmerge first* (clears half-merged artefacts) and
+           retry with the low-level ``rng.api.Merge()`` which accepts no
+           arguments and is more tolerant on macOS.
+        """
+        sheet = self._require_sheet(sheet_name)  # ensures connection
+        logger = logging.getLogger(__name__)
+        rng = sheet.range(range_address)
+
+        # 0️⃣ Already merged? Nothing to do.
+        try:
+            if (
+                hasattr(rng, "merge_area")
+                and rng.merge_area.address.replace("$", "") == rng.address.replace("$", "")
+            ):
+                logger.debug("Range %s!%s already merged – skipping.", sheet_name, range_address)
+                return
+        except Exception:
+            # merge_area may not exist in every build; ignore
+            pass
+
+        def _attempt(label: str, func) -> bool:
+            try:
+                func()
+                logger.debug("Merge via %s succeeded for %s!%s", label, sheet_name, range_address)
+                return True
+            except Exception as exc:
+                logger.debug("Merge via %s failed for %s!%s: %s", label, sheet_name, range_address, exc)
+                return False
+
+        # 1️⃣ primary path
+        if _attempt("rng.merge()", lambda: rng.merge()):
+            return
+
+        # 2️⃣ fallback – unmerge first, then low-level merge
+        try:
+            rng.unmerge()
+        except Exception:
+            pass  # best-effort
+
+        if _attempt("rng.api.Merge()", lambda: rng.api.Merge()):
+            return
+
+        # Everything failed
+        raise RuntimeError(f"Could not merge cells {sheet_name}!{range_address}: all attempts failed.")
 
     def unmerge_cells_range(self, sheet_name: str, range_address: str) -> None:
-        """Unmerge cells in the specified range."""
-        sheet = self._require_sheet(sheet_name) # Ensures connection and sheet exists
-        logger = logging.getLogger(__name__)
-        try:
-            rng = sheet.range(range_address)
-            # Check if the range is actually merged before trying to unmerge
-            # This check can be complex if range_address only covers part of a merged area
-            # A simpler check: see if the top-left cell's merge_cells property is True
-            top_left_cell = rng.cells[0]
-            if not top_left_cell.merge_cells:
-                logger.debug(f"Range {sheet_name}!{range_address} or its top-left cell is not merged. Skipping unmerge.")
-                # If the specific range isn't the *entire* merged area, .unmerge() might still be needed.
-                # Let's try unmerging anyway, Excel usually handles it gracefully if not merged.
-                # return # Uncomment this to strictly skip if top-left isn't merged
+        """Unmerge cells in *range_address*.
 
-            logger.debug(f"Unmerging range: {sheet_name}!{range_address}")
-            rng.unmerge() # Use xlwings method
-            # Alternative API call: sheet.range(range_address).api.UnMerge()
-        except Exception as e:
-            logger.error(f"Failed to unmerge cells {sheet_name}!{range_address}: {e}")
-            # Consider if this should raise or just log
-            raise # Let's raise for now so the tool knows it failed
+        The previous implementation relied on ``rng.cells[0]`` which is not
+        available on certain macOS builds.  We now trust Excel’s own resilience:
+        calling unmerge on an already-unmerged range is a harmless no-op.
+        """
+        sheet = self._require_sheet(sheet_name)  # ensures connection
+        logger = logging.getLogger(__name__)
+        rng = sheet.range(range_address)
+
+        # First attempt – high-level helper
+        try:
+            rng.unmerge()
+            logger.debug("Unmerged %s!%s via rng.unmerge()", sheet_name, range_address)
+
+            # ── Preserve value across the newly split cells ───────────────
+            top_val = rng.value  # after unmerge this is now a 2-D list
+            if not isinstance(top_val, list):
+                top_val = [[top_val]]
+            if top_val and top_val[0]:
+                seed = top_val[0][0]
+                if seed not in (None, ""):
+                    blanks = {}
+                    for cell in rng:
+                        if cell.value in (None, ""):
+                            blanks[cell.address.replace("$", "")] = seed
+                    if blanks:
+                        self.set_cell_values(sheet_name, blanks)
+                        logger.debug("Replicated merged value to %d empty cell(s)", len(blanks))
+
+            return
+        except Exception as exc1:
+            logger.debug("rng.unmerge() failed: %s; trying rng.api.UnMerge()", exc1)
+
+        # Fallback – low-level API
+        try:
+            rng.api.UnMerge()
+            logger.debug("Unmerged %s!%s via rng.api.UnMerge()", sheet_name, range_address)
+        except Exception as exc2:
+            logger.error("Failed to unmerge %s!%s: %s", sheet_name, range_address, exc2)
+            raise RuntimeError(f"Could not unmerge cells {sheet_name}!{range_address}: {exc2}") from exc2
 
     # --------------------------------------------------------------------------
     #  Row / column sizing

@@ -9,6 +9,7 @@ A command-line tool that uses an AI agent to perform spreadsheet operations on E
 - Verbose mode for debug logging and full result inspection.
 - Emoji-enhanced, structured logging for clear status updates.
 - Bulk operations for tables, formulas, and cell styling.
+- **Dynamic Context**: Workbook structure (`<workbook_shape>`) and progress updates (`<progress_summary>`) are injected directly into the conversation history as assistant messages, keeping the LLM informed without cluttering the main system prompt.
 
 ## Requirements
 - Python 3.9 or higher

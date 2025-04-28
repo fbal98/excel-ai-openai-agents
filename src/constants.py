@@ -32,6 +32,14 @@ WRITE_TOOLS = {
     # Exclude save_workbook_tool as it doesn't change the structure/content itself
 }
 
+# State keys
+# DEPRECATED: direct usage of "summary" state key is replaced by emitting
+# `<progress_summary>` messages into `conversation_history` via ConversationContext.
+# Keep for backward compatibility only in case older demos/code rely on it.
+SUMMARY_STATE_KEY = "summary"
+CONVERSATION_HISTORY_KEY = "conversation_history"
+
+
 # ------------------------------------------------------------------
 #  Post‑definition patch: keep bookkeeping in sync even if the
 #  original WRITE_TOOLS literal is copied elsewhere.

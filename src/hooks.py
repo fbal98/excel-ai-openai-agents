@@ -4,12 +4,18 @@ Agent‑level hooks for memory, progressive‑summary, and workbook shape tracki
 
 from __future__ import annotations
 
+import copy # Import copy for deepcopy
 import logging
 import re
-from typing import Any, Dict, Optional
+from typing import Any, Dict, Optional, TYPE_CHECKING
 
 from agents import Agent, AgentHooks, RunContextWrapper, Tool, FunctionTool, Usage
 
+# Import AppContext only for type hinting if necessary, avoid runtime circular dependency
+if TYPE_CHECKING:
+    from .context import AppContext
+
+from .conversation_context import ConversationContext # Import the new helper
 from .constants import WRITE_TOOLS
 from .debounce_constants import SHAPE_SCAN_EVERY_N_WRITES, STRUCTURAL_WRITE_TOOLS, MAX_CONSECUTIVE_ERRORS
 from .costs import dollars_for_usage
@@ -59,12 +65,25 @@ def append_summary_line(app_ctx: "AppContext", line: str, max_lines: int = 15) -
     """
     prev = app_ctx.state.get("summary", "")
     lines = (prev.splitlines() + [line])[-max_lines:]
-    app_ctx.state["summary"] = "\n".join(lines)
+    app_ctx.state["summary"] = "\n".join(lines) # Keep for backward compat
+
+    # Now also add to conversation history using the new context helper
+    try:
+        ConversationContext.emit_progress_line(app_ctx, line)
+        # Pruning happens immediately after emitting a progress line
+        ConversationContext.maybe_prune(app_ctx)
+    except Exception as e:
+        logger.error(f"Error emitting progress line or pruning: {e}", exc_info=True)
 
 
 class SummaryHooks(AgentHooks):
     """
-    - After every tool call, append a short line to ``ctx.state["summary"]``.
+    - Emits progress lines and tool failures to conversation history.
+    - Emits workbook shape deltas after write operations.
+    - Refreshes ``ctx.shape`` snapshot via ``ctx.update_shape()`` after WRITE_TOOLS.
+    - If shape refresh succeeds, dump the state (shape + agent_state) to JSON.
+    - Tracks consecutive errors to prevent loops.
+    - (Legacy) Appends short summary lines to ``ctx.state["summary"]``.
     - After calls to WRITE_TOOLS, refresh the ``ctx.shape`` snapshot via ``ctx.update_shape()``.
     - If shape refresh succeeds, dump the state (shape + agent_state) to JSON.
     """
@@ -100,15 +119,26 @@ class SummaryHooks(AgentHooks):
         context: RunContextWrapper[AppContext],
         agent: Agent,
         tool: Tool,
-        result: Any,
+            result: Any,
     ) -> None:
         tool_name = self._get_tool_name(tool)
+        app_ctx = context.context # Get AppContext instance
         logger.debug(f"HOOK: on_tool_end - tool type: {type(tool)}, tool: {tool}, tool_name: {tool_name}, result: {result}")
 
-        args = context.context.state.pop("_last_args", {})
+        # Capture the shape before update
+        old_shape_before = None
+        if app_ctx.shape:
+            try:
+                old_shape_before = copy.deepcopy(app_ctx.shape)
+                logger.debug("Captured old shape (v%s) before tool execution.", old_shape_before.version)
+            except Exception as e:
+                 logger.error(f"Failed to deepcopy old shape: {e}", exc_info=True)
+                 # Proceed without old_shape if copy fails
+
+        args = app_ctx.state.pop("_last_args", {})
         ok = _is_result_ok(result)
 
-        context.context.record_action(
+        app_ctx.record_action(
             tool=tool_name,
             args=args,
             result=result,
@@ -142,11 +172,22 @@ class SummaryHooks(AgentHooks):
                     app_ctx.pending_write_count,
                 )
                 try:
-                    if app_ctx.update_shape(tool_name=tool_name): # Pass tool_name here
+                    # Store result of update_shape to check if it *actually* updated
+                    shape_updated = app_ctx.update_shape(tool_name=tool_name) # Pass tool_name here
+
+                    if shape_updated:
+                        # Emit shape delta only if update_shape returned True (meaning change detected)
+                        try:
+                             ConversationContext.emit_shape_delta(app_ctx, old_shape_before, app_ctx.shape)
+                             # Pruning might be needed after emitting potentially large shape deltas
+                             ConversationContext.maybe_prune(app_ctx)
+                        except Exception as e:
+                             logger.error(f"Error emitting shape delta or pruning: {e}", exc_info=True)
+
                         app_ctx.pending_write_count = 0 # Reset counter only on successful scan
-                        app_ctx.dump_state_to_json()
+                        app_ctx.dump_state_to_json() # Dump state after successful update and potential delta emission
                     else:
-                        # Update_shape might return False if scan failed or was skipped.
+                        # Update_shape might return False if scan failed or was skipped or no change detected.
                         # Keep the counter incrementing if the scan didn't actually happen or failed.
                         # If update_shape returned False due to an error, the error is logged within update_shape.
                         if app_ctx.shape: # Log current state if scan failed but shape exists
@@ -174,9 +215,19 @@ class SummaryHooks(AgentHooks):
 
         # Extract error message ONLY if it was an actual failure
         if is_failure:
-            error_msg = tool_result.get("error", f"Operation failed with result: {result}")
+            # Ensure error_msg is a string representation
+            error_msg = str(tool_result.get("error", f"Operation failed with result: {result}"))
+
+            # Emit the failure to conversation history
+            try:
+                ConversationContext.emit_tool_failure(app_ctx, tool_name, error_msg)
+                # Prune after emitting failure message as well
+                ConversationContext.maybe_prune(app_ctx)
+            except Exception as e:
+                logger.error(f"Error emitting tool failure or pruning: {e}", exc_info=True)
+
             logger.debug(f"Tool '{tool_name}' failed. Error: {error_msg}. Consecutive count: {app_ctx.consecutive_errors + 1}")
-            
+
             # Extract core error message by removing variable parts
             # This helps match similar errors with slight differences
             core_error = self._extract_core_error(error_msg)
