@@ -109,17 +109,9 @@ def format_event(ev: Any) -> Optional[str]:  # noqa: D401
         or evd.get("category")
     )
 
-    # ── Assistant message chunks ────────────────────────────────────────────
+    # ── Assistant message tokens are streamed directly in the CLI ──────────
     if kind in {"message_output_item", "assistant_message", "assistant_chunk"}:
-        chunk = evd.get("text") or evd.get("delta") or evd.get("content") or ""
-        if chunk:
-            # Preserve newlines in the original chunks
-            _ASSISTANT_BUFFER.append(str(chunk))
-        is_final_chunk = evd.get("last") or evd.get("is_finished")
-        if is_final_chunk:
-            # Pass is_final=True to add checkmark
-            return _flush_assistant_buffer(is_final=True)
-        return None  # keep buffering
+        return None
 
     # Any *other* event flushes pending assistant text first
     # Ensure is_final is False for intermediate flushes

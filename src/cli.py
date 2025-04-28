@@ -51,7 +51,8 @@ from agents import Runner, Agent
 from agents.result import RunResultStreaming
 from agents.stream_events import StreamEvent
 from agents.exceptions import UserError
-from agents import RunContextWrapper, FunctionTool # Added FunctionTool
+from agents import RunContextWrapper, FunctionTool  # Added FunctionTool
+from openai.types.responses import ResponseTextDeltaEvent
 
 from .excel_ops import ExcelConnectionError, ExcelManager
 from .model_config import (
@@ -277,14 +278,37 @@ async def _run_agent_with_retry(agent: Agent, input_data: list, ctx: AppContext,
                 print(f"{spinner_prefix}...", flush=True)
 
         async for ev in result_stream.stream_events():
+            # ── Raw delta tokens ────────────────────────────────────────────
+            if ev.type == "raw_response_event" and isinstance(ev.data, ResponseTextDeltaEvent):
+                print(ev.data.delta, end="", flush=True)
+                if not first_event_received:
+                    first_event_received = True
+                    if thinking_task and not thinking_task.done():
+                        thinking_task.cancel()
+                        with contextlib.suppress(asyncio.CancelledError):
+                            await thinking_task
+                continue
+
+            # ── Higher-level events (tools, thoughts, etc.) ────────────────
+            # ── Raw delta tokens ────────────────────────────────────────────
+            with contextlib.suppress(asyncio.CancelledError):
+                if not first_event_received:
+                    first_event_received = True
+                    if thinking_task and not thinking_task.done():
+                        thinking_task.cancel()
+                        with contextlib.suppress(asyncio.CancelledError):
+                            await thinking_task
+                continue
+
+            # ── Higher-level events (tools, thoughts, etc.) ────────────────
             formatted_output = format_event(ev)
-            if formatted_output and not first_event_received:
-                first_event_received = True
-                if thinking_task and not thinking_task.done():
-                    thinking_task.cancel()
-                    with contextlib.suppress(asyncio.CancelledError):
-                        await thinking_task
             if formatted_output:
+                if not first_event_received:
+                    first_event_received = True
+                    if thinking_task and not thinking_task.done():
+                        thinking_task.cancel()
+                        with contextlib.suppress(asyncio.CancelledError):
+                            await thinking_task
                 print(formatted_output, end="")
                 sys.stdout.flush()
 
