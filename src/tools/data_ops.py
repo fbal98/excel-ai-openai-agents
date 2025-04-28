@@ -84,7 +84,7 @@ def get_cell_value_tool(ctx: RunContextWrapper[AppContext], sheet_name: str, cel
 @function_tool
 def get_range_values_tool(ctx: RunContextWrapper[AppContext], sheet_name: str, range_address: str) -> ToolResult:
     """
-    Retrieves values from a rectangular cell range using the unified ExcelManager.
+    Retrieves values from a rectangular cell range. 
 
     Args:
         ctx (RunContextWrapper[AppContext]): Agent context containing the ExcelManager.

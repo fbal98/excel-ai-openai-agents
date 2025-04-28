@@ -1,9 +1,10 @@
 # src/tools/core_defs.py
 import logging
+import re
 from typing import Any, Dict, Optional, List, Union
 from typing_extensions import TypedDict  # Use typing_extensions for compatibility
 import asyncio
-from agents import FunctionTool as _FunctionTool # Use alias to avoid potential name clash
+from agents import FunctionTool as _FunctionTool  # Use alias to avoid potential name clash
 
 # Define a custom exception for connection issues (though defined in excel_ops, good to have awareness)
 # from ..excel_ops import ExcelConnectionError # Relative import if needed elsewhere
@@ -15,6 +16,7 @@ class ToolResult(TypedDict, total=False):
     success: bool           # always present – True/False
     error: Optional[str]    # present on failure, None on success
     data: Optional[Any]     # optional payload (lists, scalars, etc.)
+    hint: Optional[str]     # extra guidance message to help the agent recover
 
 class SetCellValuesResult(ToolResult, total=False):
     """Backward‑compat alias kept for type hints."""
@@ -144,23 +146,92 @@ def _normalise_rows(columns: list[Any], rows: list[list[Any]]) -> list[list[Any]
     width = len(columns)
     fixed: list[list[Any]] = []
     for r in rows:
-        if not isinstance(r, list): # Handle cases where a row might not be a list
-            r = [r] + [None] * (width - 1) if width > 0 else [] # Convert non-list row
+        if not isinstance(r, list):  # Handle cases where a row might not be a list
+            r = [r] + [None] * (width - 1) if width > 0 else []  # Convert non-list row
         row_len = len(r)
         if row_len < width:
-            # pad short rows
-            fixed.append(r + [None] * (width - row_len))
+            fixed.append(r + [None] * (width - row_len))   # pad short rows
         elif row_len > width:
-            # truncate long rows
-            fixed.append(r[:width])
+            fixed.append(r[:width])                        # truncate long rows
         else:
             fixed.append(r)
     return fixed
 
+
+# ----------------------------------------------------------------------
+#                     Contextual hint support 👇
+# ----------------------------------------------------------------------
+_HINT_PATTERNS: list[tuple[re.Pattern, str]] = [
+    (re.compile(r"Connection Error", re.I),
+     "Check that Excel is open and not showing a modal dialog."),
+    (re.compile(r"sheet.*not found", re.I),
+     "Run `create_sheet_tool` first or spell-check the name via `get_sheet_names_tool`."),
+    (re.compile(r"formula.*must start with", re.I),
+     "Prepend ‘=’ to the formula string."),
+    (re.compile(r"file not found", re.I),
+     "Use /new or give an absolute path."),
+    (re.compile(r"no snapshot", re.I),
+     "Call `snapshot_tool` first."),
+    (re.compile(r"sheet exists", re.I),
+     "Use `get_sheet_names_tool` to pick a unique name."),
+    (re.compile(r"last sheet", re.I),
+     "Insert a new sheet, then delete."),
+    (re.compile(r"dictionary cannot be empty", re.I),
+     "Pass a mapping like {'A1':123} ."),
+    (re.compile(r"coordinate_from_string", re.I),
+     "Use A1, not R1C1."),
+    (re.compile(r"#NAME\\?", re.I),
+     "Check named ranges or switch to absolute refs."),
+    (re.compile(r"must be 8.?digit.*ARGB", re.I),
+     "Supply 8-digit ARGB like FFFFFF00."),
+    (re.compile(r"paste_opts", re.I),
+     "Valid options: values|formulas|formats|all."),
+]
+
+def _hint_for(msg: str) -> str:
+    """Return a helpful hint for *msg* (case-insensitive); empty string if none matched."""
+    for pat, hint in _HINT_PATTERNS:
+        if pat.search(msg or ""):
+            return hint
+    return ""
+
 # --- Tool Result Unification ---
 
 def _ensure_toolresult(res: Any) -> ToolResult:
-    """Normalize arbitrary returns → ToolResult."""
+    """
+    Normalize arbitrary returns → ToolResult **and** append a contextual
+    recovery *hint* whenever the operation failed.
+    """
+    # ---------- 1. Bring everything into ToolResult shape ----------
+    if isinstance(res, dict) and res.get("success") is not None:
+        norm: ToolResult = res  # Already has success key
+        if norm["success"] and "error" not in norm:
+            norm["error"] = None
+    else:
+        # Legacy paths ↓
+        if isinstance(res, dict):
+            if "error" in res:
+                norm = {
+                    "success": False,
+                    "error": str(res["error"]),
+                    "data": {k: v for k, v in res.items() if k != "error"} or None,
+                }
+            else:
+                norm = {"success": True, "error": None, "data": res}  # pure data dict
+        elif res in (True, None):
+            norm = {"success": True, "error": None, "data": res}
+        elif res is False:
+            norm = {"success": False, "error": "Operation returned False", "data": None}
+        else:
+            norm = {"success": True, "error": None, "data": res}
+
+    # ---------- 2. Inject hint on failure ----------
+    if not norm["success"] and "hint" not in norm:
+        h = _hint_for(str(norm.get("error", "")))
+        if h:
+            norm["hint"] = h
+
+    return norm
     if isinstance(res, dict) and res.get("success") is not None:
         # Check if 'error' should be None when success is True
         if res.get("success") is True and "error" not in res:

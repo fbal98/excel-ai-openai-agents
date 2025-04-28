@@ -11,9 +11,16 @@ import os
 from agents import Usage
 from litellm import completion_cost # Use litellm function
 
-# Override rates for special Gemini SKU:
+# Override rates for special models or newer models not yet in litellm:
 EXTRA_RATES = {
+    # Gemini models
     "gemini-2.5-flash-preview-04-17": (0.000075 / 1000, 0.00030 / 1000),
+    
+    # OpenAI models (fallbacks if litellm pricing fails)
+    "gpt-4o": (0.01 / 1000, 0.03 / 1000),        # $0.01 per 1K input, $0.03 per 1K output
+    "gpt-4-turbo": (0.01 / 1000, 0.03 / 1000),   # $0.01 per 1K input, $0.03 per 1K output
+    "gpt-4": (0.03 / 1000, 0.06 / 1000),         # $0.03 per 1K input, $0.06 per 1K output
+    "gpt-3.5-turbo": (0.0005 / 1000, 0.0015 / 1000)  # $0.0005 per 1K input, $0.0015 per 1K output
 }
 
 # Import helper to get config, avoiding direct dependency on active state module if possible
@@ -122,28 +129,64 @@ def dollars_for_usage(usage: Usage, model_name_from_agent: str | None = None) ->
         # Use litellm.completion_cost with the potentially stripped name
         cost = completion_cost(
             model=model_for_costing,
-            prompt_tokens=prompt_tokens,
-            completion_tokens=completion_tokens,
+            input_tokens=prompt_tokens,  # litellm expects input_tokens, not prompt_tokens
+            output_tokens=completion_tokens,  # litellm might expect output_tokens instead of completion_tokens
         )
 
         # completion_cost returns None if model pricing is not found
         if cost is None:
-             logger.warning(f"LiteLLM could not find pricing data for model '{model_for_costing}'. Cost assumed to be $0.00.")
-             # Additional debugging for Gemini models since they often have pricing issues
-             if "gemini" in model_for_costing.lower():
-                 logger.warning(f"Gemini model pricing not found. Common issue with newer Gemini models in litellm.")
-                 # Try a fallback pricing calculation for Gemini models
-                 try:
-                    # Approximation based on published rates for Gemini models
-                    # These rates might need adjustment based on actual pricing
-                    input_rate = 0.000125 / 1000  # $0.000125 per 1K input tokens
-                    output_rate = 0.000375 / 1000  # $0.000375 per 1K output tokens
+            logger.warning(f"LiteLLM could not find pricing data for model '{model_for_costing}'. Trying fallback pricing.")
+            
+            # Try to use our predefined fallback rates
+            model_key = None
+            
+            # Check for exact match first
+            if model_for_costing in EXTRA_RATES:
+                model_key = model_for_costing
+            # Then try base model name (without version specifiers)
+            else:
+                # For names like "gpt-4-1106-preview", extract the base model "gpt-4"
+                base_name = model_for_costing.split('-')[0:2]  # Take first two parts, e.g., ["gpt", "4"]
+                if len(base_name) >= 2:
+                    base_model = '-'.join(base_name)  # Create "gpt-4"
+                    # Check if we have rates for the base model
+                    if base_model in EXTRA_RATES:
+                        model_key = base_model
+                
+            # Use fallback pricing if we found a match
+            if model_key:
+                try:
+                    input_rate, output_rate = EXTRA_RATES[model_key]
                     cost = (prompt_tokens * input_rate) + (completion_tokens * output_rate)
-                    logger.info(f"Used fallback pricing for Gemini model: ${cost:.6f}")
+                    logger.info(f"Used fallback pricing for model '{model_for_costing}' (matched to '{model_key}'): ${cost:.6f}")
                     return round(cost, 6)
-                 except Exception as e:
+                except Exception as e:
                     logger.error(f"Fallback pricing calculation failed: {e}")
-             return 0.0
+            
+            # If all else fails, use generic estimates based on model family
+            try:
+                if "gpt-4" in model_for_costing.lower():
+                    # Generic GPT-4 family rate
+                    input_rate, output_rate = 0.01 / 1000, 0.03 / 1000
+                elif "gpt-3" in model_for_costing.lower():
+                    # Generic GPT-3.5 family rate
+                    input_rate, output_rate = 0.0005 / 1000, 0.0015 / 1000
+                elif "gemini" in model_for_costing.lower():
+                    # Generic Gemini rate
+                    input_rate, output_rate = 0.000075 / 1000, 0.00030 / 1000
+                else:
+                    # If we can't identify the model family, assume it's a basic model
+                    logger.warning(f"Using generic pricing for unknown model type: {model_for_costing}")
+                    input_rate, output_rate = 0.0005 / 1000, 0.0015 / 1000
+                
+                cost = (prompt_tokens * input_rate) + (completion_tokens * output_rate)
+                logger.info(f"Used generic fallback pricing for {model_for_costing}: ${cost:.6f}")
+                return round(cost, 6)
+            except Exception as e:
+                logger.error(f"Generic fallback pricing calculation failed: {e}")
+                
+            # If all fallback strategies fail    
+            return 0.0
 
         logger.info(f"Calculated cost via litellm: ${cost:.6f}")
         return round(cost, 6) # Sane default precision: micro-dollar resolution

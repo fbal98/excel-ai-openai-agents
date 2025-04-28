@@ -51,7 +51,7 @@ from agents import Runner, Agent
 from agents.result import RunResultStreaming
 from agents.stream_events import StreamEvent
 from agents.exceptions import UserError
-from agents import RunContextWrapper
+from agents import RunContextWrapper, FunctionTool # Added FunctionTool
 
 from .excel_ops import ExcelConnectionError, ExcelManager
 from .model_config import (
@@ -85,6 +85,39 @@ logging.basicConfig(level=log_level, handlers=[file_handler, console_handler])
 logger = logging.getLogger(__name__)
 
 HISTORY_FILE = ".excel_ai_history"
+
+def patch_tool_schemas(agent: Agent):
+    """
+    Ensures that the JSON schema for each FunctionTool's parameters
+    explicitly includes 'additionalProperties': False, as required by OpenAI API.
+    """
+    if not agent or not agent.tools:
+        logger.debug("Patching schemas skipped: No agent or no tools found.")
+        return
+
+    logger.debug(f"Patching schemas for {len(agent.tools)} tools...")
+    patched_count = 0
+    for tool in agent.tools:
+        if isinstance(tool, FunctionTool):
+            # Ensure params_json_schema exists and is a dictionary
+            if hasattr(tool, 'params_json_schema') and isinstance(tool.params_json_schema, dict):
+                schema = tool.params_json_schema
+                # Check if 'type' is 'object', as additionalProperties only applies to objects
+                if schema.get("type") == "object":
+                    if schema.get("additionalProperties") is not False:
+                        schema["additionalProperties"] = False
+                        logger.info(f"Patched schema for tool '{tool.name}': Set additionalProperties=False.")
+                        patched_count += 1
+                else:
+                     logger.debug(f"Skipping schema patch for tool '{tool.name}': Schema type is not 'object' (type: {schema.get('type')}).")
+            else:
+                logger.debug(f"Skipping schema patch for tool '{tool.name}': No valid params_json_schema dictionary found.")
+        else:
+            logger.debug(f"Skipping schema patch for tool '{getattr(tool, 'name', 'Unnamed Tool')}': Not a FunctionTool instance.")
+    if patched_count > 0:
+        logger.info(f"Schema patching complete. Patched {patched_count} tool schemas.")
+    else:
+        logger.debug("Schema patching complete. No schemas required patching.")
 
 # A nice style for prompt_toolkit if available
 if PROMPT_TOOLKIT_AVAILABLE:
@@ -234,6 +267,7 @@ async def _run_agent_with_retry(agent: Agent, input_data: list, ctx: AppContext,
     first_event_received = False
 
     try:
+        # Usage info must be set on the agent's model_settings, not in run_streamed
         result_stream = Runner.run_streamed(agent, input=input_data, context=ctx)
         if thinking_task is None or thinking_task.done():
             spinner_prefix = f"🤖 {get_active_provider().capitalize()} Thinking{retry_suffix}"
@@ -353,6 +387,28 @@ async def run_agent_streamed(agent: Agent, user_input: str, ctx: AppContext) -> 
                 msg = str(result_run.final_output).strip()
                 if msg:
                     print(f"\n\033[92m✔️ 🤖 Agent: {msg}\033[0m")
+
+            # ---- Persist conversation history for non-streaming runs ----
+            try:
+                hist = ctx.state.get("conversation_history", [])
+                if not isinstance(hist, list):
+                    hist = []
+                # Add the current user message unless it is a duplicate
+                if not hist or hist[-1] != current_user_message:
+                    hist.append(current_user_message)
+                # Add the assistant reply (if any)
+                if result_run and result_run.final_output:
+                    assistant_msg = str(result_run.final_output).strip()
+                    if assistant_msg:
+                        hist.append({"role": "assistant", "content": assistant_msg})
+                ctx.state["conversation_history"] = hist
+                logger.debug(f"Saved non-streaming conversation history with {len(hist)} messages")
+            except Exception as hist_err:
+                logger.error(
+                    f"Error updating conversation history (Gemini fallback): {hist_err}",
+                    exc_info=True,
+                )
+
             return None  # We didn't produce a streaming result
 
         except Exception as e:
@@ -395,6 +451,7 @@ async def run_agent_streamed(agent: Agent, user_input: str, ctx: AppContext) -> 
         else:
             print(f"{spinner_prefix}...", flush=True)
 
+        # Usage info must be set on the agent's model_settings, not in run_streamed
         result_stream = Runner.run_streamed(agent, input=input_data, context=ctx)
 
         async for ev in result_stream.stream_events():
@@ -453,6 +510,62 @@ async def run_agent_streamed(agent: Agent, user_input: str, ctx: AppContext) -> 
                         norm_msg["name"] = msg["name"]
                     filtered_history.append(norm_msg)
                 ctx.state["conversation_history"] = filtered_history
+                
+                # Extract and store cost information from result_stream
+                try:
+                    # Get usage info from the run (for OpenAI streaming runs)
+                    usage = None
+                    
+                    # Debug all available attributes on result_stream
+                    logger.debug(f"Available result_stream attributes: {dir(result_stream)}")
+                    
+                    # Try to get usage from result_stream.usage first
+                    if hasattr(result_stream, 'usage') and result_stream.usage:
+                        usage = result_stream.usage
+                        logger.info(f"Got usage from result_stream.usage: {usage}")
+                    # Then try context.usage
+                    elif hasattr(ctx, 'usage') and ctx.usage:
+                        usage = ctx.usage
+                        logger.info(f"Got usage from context.usage: {usage}")
+                    # Try to get usage from raw_responses if available
+                    elif hasattr(result_stream, 'raw_responses') and result_stream.raw_responses:
+                        for resp in result_stream.raw_responses:
+                            if hasattr(resp, 'usage') and resp.usage:
+                                usage = resp.usage
+                                logger.info(f"Got usage from raw_responses: {usage}")
+                                break
+                    # Try to access _usage if it exists (some SDK versions use private attributes)
+                    elif hasattr(result_stream, '_usage') and result_stream._usage:
+                        usage = result_stream._usage
+                        logger.info(f"Got usage from result_stream._usage: {usage}")
+                    else:
+                        logger.warning(f"No usage information found. Agent model_settings: {agent.model_settings}")
+                        
+                    if usage:
+                        # Get the model name from the agent
+                        model_name = None
+                        if hasattr(agent, 'model') and isinstance(agent.model, str):
+                            model_name = agent.model
+                            
+                        # Calculate cost
+                        from .costs import dollars_for_usage
+                        cost = dollars_for_usage(usage, model_name_from_agent=model_name)
+                        
+                        # Store in context state
+                        input_tokens = getattr(usage, "input_tokens", 0) or 0
+                        output_tokens = getattr(usage, "output_tokens", 0) or 0
+                        total_tokens = input_tokens + output_tokens
+                        
+                        ctx.state["last_run_cost"] = cost
+                        ctx.state["last_run_usage"] = {
+                            "input_tokens": input_tokens,
+                            "output_tokens": output_tokens,
+                            "total_tokens": total_tokens,
+                            "model_name": model_name or get_active_provider()
+                        }
+                        logger.info(f"Stored cost (${cost:.6f}) and usage ({total_tokens} tokens) in context state")
+                except Exception as cost_err:
+                    logger.error(f"Error calculating/storing cost: {cost_err}", exc_info=True)
             except Exception as e:
                 logger.error(f"Error saving conversation history: {e}", exc_info=True)
                 ctx.state["conversation_history"] = ctx.state.get("conversation_history", [])
@@ -537,6 +650,8 @@ async def main():
     excel_assistant_agent = None
     try:
         excel_assistant_agent = create_excel_assistant_agent()
+        if excel_assistant_agent:
+             patch_tool_schemas(excel_assistant_agent) # Apply patch after initial creation
     except Exception as e:
         print(f"\033[91m❌ Unable to initialize agent for provider '{get_active_provider()}': {e}\033[0m")
         logger.critical("Failed agent creation", exc_info=True)
@@ -738,11 +853,40 @@ async def main():
                         print("\033[93mNo cost info yet.\033[0m")
                         print("\033[93mActive provider: " + get_active_provider() + "\033[0m")
                         
-                        # Show any usage stats that might be available directly
+                        # Try to manually look for usage info and calculate cost on the spot
+                        usage_found = False
                         if hasattr(app_context, 'usage') and app_context.usage:
+                            usage_found = True
                             input_tokens = getattr(app_context.usage, "input_tokens", 0) or 0
                             output_tokens = getattr(app_context.usage, "output_tokens", 0) or 0
-                            print(f"\033[93mFound usage directly on context: Input={input_tokens}, Output={output_tokens}\033[0m")
+                            total_tokens = input_tokens + output_tokens
+                            print(f"\033[93mFound usage directly on context: Input={input_tokens}, Output={output_tokens}, Total={total_tokens}\033[0m")
+                            
+                            # Try to calculate cost right now
+                            try:
+                                from .costs import dollars_for_usage
+                                model_name = None
+                                if hasattr(excel_assistant_agent, 'model') and isinstance(excel_assistant_agent.model, str):
+                                    model_name = excel_assistant_agent.model
+                                    print(f"\033[93mModel from agent: {model_name}\033[0m")
+                                
+                                cost = dollars_for_usage(app_context.usage, model_name_from_agent=model_name)
+                                print(f"\033[92mCalculated cost now: ${cost:.4f}\033[0m")
+                                
+                                # Store it for future reference
+                                app_context.state["last_run_cost"] = cost
+                                app_context.state["last_run_usage"] = {
+                                    "input_tokens": input_tokens,
+                                    "output_tokens": output_tokens,
+                                    "total_tokens": total_tokens,
+                                    "model_name": model_name or get_active_provider()
+                                }
+                                print("\033[92mStored cost information in context state\033[0m")
+                            except Exception as calc_err:
+                                print(f"\033[91mError calculating cost: {calc_err}\033[0m")
+                        
+                        if not usage_found:
+                            print("\033[93mNo usage information found. Try running a query first.\033[0m")
                     else:
                         print(f"\033[94mCost: ${c:.4f} ({tokens} tokens, Model: {used_model})\033[0m")
 
@@ -775,7 +919,9 @@ async def main():
                         newp = cmd_args[0].lower()
                         try:
                             set_active_provider(newp)
-                            excel_assistant_agent = create_excel_assistant_agent()
+                            excel_assistant_agent = create_excel_assistant_agent() # Recreate agent
+                            if excel_assistant_agent:
+                                 patch_tool_schemas(excel_assistant_agent) # PATCH AGAIN after recreation
                             print(f"\033[92mSwitched to provider '{newp}'.\033[0m")
                         except Exception as e:
                             print(f"\033[91mFailed to switch provider: {e}\033[0m")

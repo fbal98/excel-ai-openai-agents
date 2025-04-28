@@ -65,12 +65,14 @@ def create_excel_assistant_agent() -> Agent[AppContext]:
     logger.debug("Attempting to create Excel Assistant Agent instance...")
     try:
         model_string = get_model_string() # Get the configured model identifier string
+        from agents import ModelSettings
         agent = Agent[AppContext](
             name="Excel Assistant",
             instructions=_dynamic_instructions,
             hooks=PlanCaptureHooks(),
             tools=_validated_agent_tools,
-            model=model_string # Use the model string directly
+            model=model_string, # Use the model string directly
+            model_settings=ModelSettings(include_usage=True)
         )
         logger.info(f"Excel Assistant Agent created successfully with model string: '{model_string}' (Provider: {get_active_provider()})")
         return agent
