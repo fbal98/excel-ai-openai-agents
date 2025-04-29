@@ -292,10 +292,10 @@ import logging # Added for logging
 logger = logging.getLogger(__name__) # Added logger
 
 async def run_and_cost(
-    agent: Agent, # The agent instance created by create_excel_assistant_agent
+    agent: Agent[AppContext], # The agent instance created by create_excel_assistant_agent
     *,
     input: str,
-    context, # Should be AppContext
+    context: AppContext, 
     **kw,
 ) -> Tuple[Any, Usage, float]:
     """
@@ -303,7 +303,7 @@ async def run_and_cost(
     Returns (result, usage, dollars).
     Stores cost/usage info into context.state if possible.
     """
-    res = await Runner.run(agent, input=input, context=context, **kw)
+    res = await Runner.run(agent, input=input, context=context, **kw, max_turns=25)
 
     # Assuming context object collects/updates usage; If not, need to adjust.
     # Check if usage is directly on context or nested

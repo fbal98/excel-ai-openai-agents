@@ -21,7 +21,13 @@ EXTRA_RATES = {
     "gpt-4-turbo": (0.01 / 1000, 0.03 / 1000),   # $0.01 per 1K input, $0.03 per 1K output
     "gpt-4": (0.03 / 1000, 0.06 / 1000),         # $0.03 per 1K input, $0.06 per 1K output
     "gpt-3.5-turbo": (0.0005 / 1000, 0.0015 / 1000), # $0.0005 per 1K input, $0.0015 per 1K output
-    "gpt-4.1-nano": (0.0005 / 1000, 0.0015 / 1000)   # Placeholder, adjust if needed
+    # Official OpenAI pricing as of April 2025:
+    # GPT-4.1: Input $2.00/1K, Output $8.00/1K, Cached input $0.50/1K
+    "gpt-4.1": (2.00 / 1000, 8.00 / 1000),
+    # GPT-4.1 mini: Input $0.40/1K, Output $1.60/1K, Cached input $0.10/1K
+    "gpt-4.1-mini": (0.40 / 1000, 1.60 / 1000),
+    # GPT-4.1 nano: Input $0.10/1K, Output $0.40/1K, Cached input $0.025/1K
+    "gpt-4.1-nano": (0.10 / 1000, 0.40 / 1000)
 }
 
 # Import helper to get config, avoiding direct dependency on active state module if possible
@@ -128,10 +134,13 @@ def dollars_for_usage(usage: Usage, model_name_from_agent: str | None = None) ->
 
     try:
         # Use litellm.completion_cost with the potentially stripped name
+        # LiteLLM expects prompt/completion as strings or lists, not ints. Pass dummy strings of correct length if needed.
+        prompt_arg = (" " * prompt_tokens) if isinstance(prompt_tokens, int) and prompt_tokens > 0 else ""
+        completion_arg = (" " * completion_tokens) if isinstance(completion_tokens, int) and completion_tokens > 0 else ""
         cost = completion_cost(
             model=model_for_costing,
-            input_tokens=prompt_tokens,  # litellm expects input_tokens, not prompt_tokens
-            output_tokens=completion_tokens,  # litellm might expect output_tokens instead of completion_tokens
+            prompt=prompt_arg,
+            completion=completion_arg,
         )
 
         # completion_cost returns None if model pricing is not found
