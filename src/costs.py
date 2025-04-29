@@ -20,7 +20,8 @@ EXTRA_RATES = {
     "gpt-4o": (0.01 / 1000, 0.03 / 1000),        # $0.01 per 1K input, $0.03 per 1K output
     "gpt-4-turbo": (0.01 / 1000, 0.03 / 1000),   # $0.01 per 1K input, $0.03 per 1K output
     "gpt-4": (0.03 / 1000, 0.06 / 1000),         # $0.03 per 1K input, $0.06 per 1K output
-    "gpt-3.5-turbo": (0.0005 / 1000, 0.0015 / 1000)  # $0.0005 per 1K input, $0.0015 per 1K output
+    "gpt-3.5-turbo": (0.0005 / 1000, 0.0015 / 1000), # $0.0005 per 1K input, $0.0015 per 1K output
+    "gpt-4.1-nano": (0.0005 / 1000, 0.0015 / 1000)   # Placeholder, adjust if needed
 }
 
 # Import helper to get config, avoiding direct dependency on active state module if possible

@@ -134,8 +134,13 @@ def set_cell_values_tool(ctx: RunContextWrapper[AppContext],
     if not sheet_name:
         return {"success": False, "error": "Tool 'set_cell_values_tool' failed: 'sheet_name' cannot be empty."}
     if not data: # Check if data dictionary is empty
-        print("[TOOL ERROR] set_cell_values_tool called with empty data dictionary.")
-        return {"success": False, "error": "Tool 'set_cell_values_tool' failed: The 'data' dictionary cannot be empty. Provide cell addresses and values."}
+        print("[INFO] set_cell_values_tool: Received empty data dict – nothing to write.")
+        return {
+            "success": True,
+            "error": None,
+            "data": None,
+            "hint": "No-op: empty mapping; nothing was written."
+        }
     # Optional: Add validation for keys (cell addresses) and values if needed, though manager might handle it.
     # --- End Validation ---
     print(f"[TOOL] set_cell_values_tool: {sheet_name}, {len(data)} cells")

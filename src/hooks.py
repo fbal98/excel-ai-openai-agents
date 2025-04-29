@@ -65,7 +65,7 @@ def append_summary_line(app_ctx: "AppContext", line: str, max_lines: int = 15) -
     """
     prev = app_ctx.state.get("summary", "")
     lines = (prev.splitlines() + [line])[-max_lines:]
-    app_ctx.state["summary"] = "\n".join(lines) # Keep for backward compat
+    # app_ctx.state["summary"] = "\n".join(lines) # REMOVED - Handled by ConversationContext
 
     # Now also add to conversation history using the new context helper
     try:

@@ -59,10 +59,6 @@ def _compact_headers(headers):
             empty_streak = 0
             result.append(str(header)) # Ensure string conversion
 
-    # Remove trailing ellipsis if present
-    if result and result[-1] == "...":
-        result.pop()
-
     return result
 
 def _format_workbook_shape(shape: Optional[WorkbookShape]) -> str: # Use WorkbookShape directly
@@ -138,29 +134,13 @@ def _format_workbook_shape(shape: Optional[WorkbookShape]) -> str: # Use Workboo
 
 def _dynamic_instructions(wrapper: RunContextWrapper[AppContext], agent: Agent) -> str:  # noqa: D401
     """
-    Combine the static SYSTEM_PROMPT with:
-    1. A snapshot of the current workbook shape (`<workbook_shape>`).
-    2. Any running summary lines stored in ``ctx.state["summary"]``.
+    Return the static SYSTEM_PROMPT.
+    Dynamic context (shape, progress, state) is now injected directly into
+    the conversation history by hooks and ConversationContext.
     """
-    app_ctx = wrapper.context
-    # Fetch shape directly from AppContext field
-    shape_str = _format_workbook_shape(app_ctx.shape)
-    raw_summary = app_ctx.state.get("summary", "")  # Summary still comes from state dict
-
-    prompt_parts = [SYSTEM_PROMPT, shape_str]  # Place shape after main prompt
-    # Surface session-level state (e.g., current sheet) to the LLM
-    if "current_sheet" in app_ctx.state:
-        prompt_parts.append(
-            f"<session_state>\ncurrent_sheet={app_ctx.state['current_sheet']}\n</session_state>"
-        )
-    if raw_summary:
-        # Cap summary lines to last 30 entries to limit context size
-        lines = raw_summary.splitlines()
-        capped_lines = lines[-30:]
-        summary = "\n".join(capped_lines)
-        prompt_parts.append(f"<progress_summary>\n{summary}\n</progress_summary>")
-
-    return "\n\n".join(prompt_parts)
+    # No longer dynamically adding shape, summary, or session state here.
+    # This info is now managed within the conversation_history.
+    return SYSTEM_PROMPT
 
 
 SYSTEM_PROMPT="""

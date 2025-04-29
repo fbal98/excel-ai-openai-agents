@@ -595,18 +595,7 @@ async def run_agent_streamed(agent: Agent, user_input: str, ctx: AppContext) -> 
                 ctx.state["conversation_history"] = ctx.state.get("conversation_history", [])
 
         # Info logs after the run
-        if SHOW_COST:
-            if "last_run_cost" in ctx.state:
-                cost = ctx.state.get("last_run_cost", 0.0)
-                usage_info = ctx.state.get("last_run_usage", {})
-                tokens = usage_info.get("total_tokens", "N/A")
-                model_used = usage_info.get("model_name", "N/A")
-                cost_style = "\033[90m\033[3m"
-                print(f"{cost_style}💰 Cost: ${cost:.4f} ({tokens} tokens, Model: {model_used})\033[0m", file=sys.stderr)
-            else:
-                # Debug output to identify why costs might not be showing
-                logger.warning("SHOW_COST is True but 'last_run_cost' not found in context state")
-                print("\033[93m⚠️ Cost info missing. Check logs for details.\033[0m", file=sys.stderr)
+        # Cost printout removed: only show cost at session end or on explicit /cost command
 
         return result_stream
 
@@ -729,7 +718,7 @@ async def main():
                     print(f"\033[91m❌ Unknown command '/{cmd}'. Use '/help'.\033[0m")
                     continue
 
-                if cmd in ["exit", "quit"]:
+                elif cmd in ["exit", "quit"]:
                     print("\n\033[95m--- Current System Prompt ---\033[0m")
                     if excel_assistant_agent:
                         try:
@@ -739,6 +728,15 @@ async def main():
                         except Exception as err:
                             print(f"Error showing system prompt: {err}")
                     print("\033[95m--- End System Prompt ---\n")
+                    # Print cost summary at session end if available
+                    last_cost = app_context.state.get("last_run_cost")
+                    usage = app_context.state.get("last_run_usage", {})
+                    tokens = usage.get("total_tokens", "N/A")
+                    model_used = usage.get("model_name", get_active_provider())
+                    if last_cost is not None:
+                        print(f"\033[96m💰 Session cost: ${last_cost:.4f} ({tokens} tokens, Model: {model_used})\033[0m")
+                    else:
+                        print("\033[96m💰 Session cost: $0.0000 (no usage recorded)\033[0m")
                     break
 
                 elif cmd == "open":
