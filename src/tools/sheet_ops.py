@@ -8,15 +8,16 @@ from typing import Any, Optional, List
 
 @function_tool
 def get_sheet_names_tool(ctx: RunContextWrapper[AppContext]) -> ToolResult:
-    """
-    Retrieves all worksheet names in the current Excel workbook.
+    """Retrieves the names of all worksheets currently in the workbook.
 
     Args:
-        ctx (RunContextWrapper[AppContext]): Agent context containing the ExcelManager.
+        ctx: Agent context (injected automatically).
 
     Returns:
-        ToolResult: {'success': True, 'data': List[str]} A list of worksheet names on success.
-                    {'success': False, 'error': str} if an error occurred.
+        ToolResult: {'success': True, 'data': List[str]} where 'data' is a list
+                    containing the names of all worksheets in their current order.
+                    Returns an empty list if the workbook has no sheets.
+                    {'success': False, 'error': str} if an error occurred (e.g., connection error).
     """
     try:
         names = ctx.context.excel_manager.get_sheet_names()
@@ -31,15 +32,16 @@ def get_sheet_names_tool(ctx: RunContextWrapper[AppContext]) -> ToolResult:
 
 @function_tool
 def get_active_sheet_name_tool(ctx: RunContextWrapper[AppContext]) -> ToolResult:
-    """
-    Retrieves the name of the currently active worksheet.
+    """Retrieves the name of the worksheet that is currently active (selected) in Excel.
 
     Args:
-        ctx (RunContextWrapper[AppContext]): Agent context containing the ExcelManager.
+        ctx: Agent context (injected automatically).
 
     Returns:
-        ToolResult: {'success': True, 'data': str} Name of the active sheet on success.
-                    {'success': False, 'error': str} if an error occurred or no sheet active.
+        ToolResult: {'success': True, 'data': str} where 'data' is the name of the
+                    currently active worksheet.
+                    {'success': False, 'error': str} if an error occurred or if no sheet
+                    could be identified as active (e.g., workbook closing, no sheets exist).
     """
     try:
         name = ctx.context.excel_manager.get_active_sheet_name()
@@ -57,17 +59,23 @@ def get_active_sheet_name_tool(ctx: RunContextWrapper[AppContext]) -> ToolResult
 
 @function_tool
 async def create_sheet_tool(ctx: RunContextWrapper[AppContext], sheet_name: str, index: Optional[int] = None) -> ToolResult:
-    """
-    Creates a new sheet with the given name and optional index.
+    """Creates a new worksheet in the current workbook.
+
+    Adds a new sheet with the specified `sheet_name`. Optionally, the sheet
+    can be inserted at a specific position using the 0-based `index`. If the
+    name already exists, an error is returned. Updates the workbook shape context.
 
     Args:
         ctx: Agent context (injected automatically).
-        sheet_name: Name of the new sheet.
-        index: Optional 0-based position for the new sheet.
+        sheet_name: The desired name for the new worksheet. Must be unique.
+        index: (Optional) The 0-based position where the new sheet should be
+               inserted (e.g., 0 for the first sheet, 1 for the second). If omitted,
+               the sheet is typically added at the end.
 
     Returns:
-        ToolResult: {'success': True, 'data': sheet_name} on success.
-                    {'success': False, 'error': str} on failure.
+        ToolResult: {'success': True, 'data': str} where 'data' is the `sheet_name`
+                    of the successfully created sheet. The new sheet becomes the 'current_sheet'.
+                    {'success': False, 'error': str} on failure (e.g., name already exists, connection error).
     """
     print(f"[TOOL] create_sheet_tool: sheet_name={sheet_name}, index={index}")
     # --- Input Validation ---
@@ -96,16 +104,21 @@ async def create_sheet_tool(ctx: RunContextWrapper[AppContext], sheet_name: str,
 
 @function_tool
 def delete_sheet_tool(ctx: RunContextWrapper[AppContext], sheet_name: str) -> ToolResult:
-    """
-    Deletes the specified sheet from the workbook. Cannot delete the last sheet.
+    """Deletes a specified worksheet from the workbook.
+
+    Removes the sheet identified by `sheet_name`. Note that Excel typically
+    prevents the deletion of the very last remaining sheet in a workbook.
+    Updates the workbook shape context and resets 'current_sheet' if the deleted sheet was active.
 
     Args:
         ctx: Agent context (injected automatically).
-        sheet_name: Name of the sheet to delete.
+        sheet_name: The name of the worksheet to delete.
 
     Returns:
-        ToolResult: {'success': True, 'data': sheet_name} on success.
-                    {'success': False, 'error': str} on failure.
+        ToolResult: {'success': True, 'data': str} where 'data' is the `sheet_name`
+                    of the successfully deleted sheet.
+                    {'success': False, 'error': str} on failure (e.g., sheet not found,
+                    attempting to delete the last sheet, connection error).
     """
     print(f"[TOOL] delete_sheet_tool: sheet_name={sheet_name}")
     # --- Input Validation ---
@@ -138,17 +151,27 @@ def delete_sheet_tool(ctx: RunContextWrapper[AppContext], sheet_name: str) -> To
 
 @function_tool
 def get_dataframe_tool(ctx: RunContextWrapper[AppContext], sheet_name: str, header: Optional[bool] = None) -> ToolResult:
-    """
-    Returns the entire used range of the sheet as a structured dump:
-        {'success': True, 'data': {"columns": [...], "rows": [[...], ...]}}
+    """Reads the used range of a sheet and returns it as structured data (columns and rows).
+
+    Retrieves the content of the 'used range' (the rectangular area containing data)
+    from the specified `sheet_name`. The result is formatted as a dictionary containing
+    a list of column headers and a list of data rows.
 
     Args:
         ctx: Agent context (injected automatically).
-        sheet_name: Worksheet name.
-        header: Treat first row as headers? If omitted or None, defaults to True behaviour internally.
-    Args:
-        sheet_name: Worksheet name.
-        header: Treat first row as headers (default True).
+        sheet_name: The name of the worksheet to read from.
+        header: (Optional) Boolean indicating whether the first row of the used range
+                should be treated as column headers. If `True` or omitted/None, the first
+                row becomes the 'columns' list in the result, and 'rows' contains the
+                subsequent data. If `False`, the 'columns' list will be empty or represent
+                Excel column letters, and 'rows' will contain all data including the first row.
+                Defaults internally to True if not specified.
+
+    Returns:
+        ToolResult:
+            {'success': True, 'data': {'columns': List[str], 'rows': List[List[CellValue]]}}
+            On success, 'data' contains the extracted headers ('columns') and data ('rows').
+            {'success': False, 'error': str} if an error occurred (e.g., sheet not found, connection error).
     """
     print(f"[TOOL] get_dataframe_tool: sheet={sheet_name}, header={header}")
     if not sheet_name:

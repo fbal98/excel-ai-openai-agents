@@ -8,18 +8,28 @@ from typing import Any, Optional, Dict, List
 # The SDK automatically handles JSON conversion from LLM to the Pydantic/TypedDict model (CellStyle).
 @function_tool(strict_mode=False) # Allow CellStyle dict to have missing optional keys
 def set_range_style_tool(ctx: RunContextWrapper[AppContext], sheet_name: str, range_address: str, style: CellStyle) -> ToolResult:
-    """
-    Applies formatting styles (font, fill, border, alignment, number_format) to a cell range.
+    """Applies various formatting styles to all cells within a specified range.
+
+    Sets formatting properties like font (name, size, bold, italic, color),
+    fill (background color, pattern), borders (style, color), alignment
+    (horizontal, vertical, wrap text), and number format for every cell
+    within the given `range_address` on the `sheet_name`.
+
+    The `style` argument is a dictionary conforming to the `CellStyle` structure,
+    allowing specification of multiple style aspects in one call. Only the provided
+    style attributes are modified; unspecified attributes remain unchanged.
 
     Args:
-        ctx (RunContextWrapper[AppContext]): Agent context containing the ExcelManager.
-        sheet_name (str): Name of the worksheet.
-        range_address (str): Excel range in A1 notation (e.g., 'A1:B2').
-        style (CellStyle): Dictionary defining style attributes. See CellStyle definition.
+        ctx: Agent context (injected automatically).
+        sheet_name: The name of the target worksheet.
+        range_address: The cell range in A1 notation (e.g., 'A1:B10', 'C2') to apply the style to.
+        style: A dictionary specifying the desired style attributes (font, fill,
+               border, alignment, number_format). Refer to `CellStyle` definition for details.
+               Can contain subsets of style attributes (e.g., only font bold and fill color).
 
     Returns:
-        ToolResult: {'success': True} if styles applied successfully.
-                    {'success': False, 'error': str} if an error occurred.
+        ToolResult: {'success': True} if the styles were applied successfully.
+                    {'success': False, 'error': str} if an error occurred (e.g., sheet not found, invalid style format, connection error).
     """
     print(f"[TOOL] set_range_style_tool: {sheet_name}!{range_address} style={style}")
     # --- Input Validation ---
@@ -52,17 +62,22 @@ def set_cell_style_tool(
     cell_address: str,
     style: CellStyle,
 ) -> ToolResult:
-    """
-    Applies formatting styles (font, fill, border, alignment, number_format) to a single cell.
+    """Applies various formatting styles to a single specified cell.
+
+    This is a convenience tool that applies styles (font, fill, border, etc.)
+    to a single cell identified by `cell_address` using the same mechanism as
+    `set_range_style_tool`.
 
     Args:
-        ctx: Agent context.
-        sheet_name: Worksheet name.
-        cell_address: Cell address (e.g. "B4").
-        style: Dictionary defining style attributes. See CellStyle definition.
+        ctx: Agent context (injected automatically).
+        sheet_name: The name of the target worksheet.
+        cell_address: The address of the single cell to style (e.g., 'B4', 'A1').
+        style: A dictionary specifying the desired style attributes (font, fill,
+               border, alignment, number_format). Refer to `CellStyle` definition.
 
-    Returns
-        ToolResult: {'success': True} on success, or {'success': False, 'error': str} on failure.
+    Returns:
+        ToolResult: {'success': True} if the style was applied successfully.
+                    {'success': False, 'error': str} on failure (e.g., sheet not found, invalid style format, connection error).
     """
     print(f"[TOOL] set_cell_style_tool: {sheet_name}!{cell_address} style={style}")
     # Basic validation
@@ -90,11 +105,23 @@ def set_cell_style_tool(
 def get_cell_style_tool(
     ctx: RunContextWrapper[AppContext], sheet_name: str, cell_address: str
 ) -> ToolResult:
-    """
-    Return the style dict (currently font bold + fill color) for a single cell.
+    """Retrieves the formatting style attributes of a single specified cell.
+
+    Reads the style properties (like font, fill, border, alignment, number format)
+    of the cell identified by `cell_address` on the `sheet_name`.
+
+    Note: The specific style attributes retrieved might evolve. Currently focuses on commonly used ones.
+
+    Args:
+        ctx: Agent context (injected automatically).
+        sheet_name: The name of the target worksheet.
+        cell_address: The address of the single cell whose style is needed (e.g., 'B4').
 
     Returns:
-        ToolResult: {'success': True, 'data': CellStyle} or {'success': False, 'error': str}
+        ToolResult: {'success': True, 'data': CellStyle} where 'data' is a dictionary
+                    conforming to the `CellStyle` structure, containing the retrieved
+                    style attributes of the cell.
+                    {'success': False, 'error': str} on failure (e.g., sheet not found, connection error).
     """
     # --- Input Validation ---
     if not sheet_name:
@@ -120,12 +147,26 @@ def get_cell_style_tool(
 def get_range_style_tool(
     ctx: RunContextWrapper[AppContext], sheet_name: str, range_address: str
 ) -> ToolResult:
-    """
-    Return a mapping of cell_address -> style_dict for cells with non-default
-    styles (currently font bold + fill color) within a rectangular range.
+    """Retrieves styles for cells within a range that have non-default formatting.
+
+    Scans the specified `range_address` on the `sheet_name` and returns a mapping
+    of cell addresses to their style properties (like font, fill, etc.). Only cells
+    that have formatting different from the default style are included in the result.
+
+    Note: The specific style attributes retrieved might evolve.
+
+    Args:
+        ctx: Agent context (injected automatically).
+        sheet_name: The name of the target worksheet.
+        range_address: The cell range (e.g., 'A1:C10') to scan for styles.
 
     Returns:
-        ToolResult: {'success': True, 'data': Dict[str, CellStyle]} or {'success': False, 'error': str}
+        ToolResult: {'success': True, 'data': Dict[str, CellStyle]} where 'data' is a
+                    dictionary mapping cell addresses (e.g., 'A1', 'B3') within the
+                    range to their respective `CellStyle` dictionaries, but only including
+                    cells with non-default styles. Returns an empty dict if no non-default
+                    styles are found.
+                    {'success': False, 'error': str} on failure (e.g., sheet not found, invalid range, connection error).
     """
     # --- Input Validation ---
     if not sheet_name:
@@ -150,16 +191,20 @@ def get_range_style_tool(
 
 @function_tool
 def merge_cells_range_tool(ctx: RunContextWrapper[AppContext], sheet_name: str, range_address: str) -> ToolResult:
-    """
-    Merges a range of cells in the specified sheet.
+    """Merges a rectangular range of cells into a single larger cell.
+
+    Combines all cells within the specified `range_address` (e.g., 'A1:B2') on the
+    `sheet_name` into one merged cell. The top-left cell's value and formatting
+    are typically retained for the merged cell.
 
     Args:
         ctx: Agent context (injected automatically).
-        sheet_name: Name of the sheet.
-        range_address: Range to merge (e.g., 'A1:B2').
+        sheet_name: The name of the target worksheet.
+        range_address: The rectangular range of cells to merge (e.g., 'A1:B2', 'C3:E3'). Must cover multiple cells.
 
     Returns:
-        ToolResult: {'success': True} if successful, or {'success': False, 'error': str} on failure.
+        ToolResult: {'success': True} if the cells were merged successfully.
+                    {'success': False, 'error': str} on failure (e.g., sheet not found, invalid range, connection error).
     """
     print(f"[TOOL] merge_cells_range_tool: {sheet_name}!{range_address}")
     # --- Input Validation ---
@@ -183,16 +228,19 @@ def merge_cells_range_tool(ctx: RunContextWrapper[AppContext], sheet_name: str, 
 
 @function_tool
 def unmerge_cells_range_tool(ctx: RunContextWrapper[AppContext], sheet_name: str, range_address: str) -> ToolResult:
-    """
-    Unmerges any merged cells within the specified range.
+    """Separates any merged cells found within a specified range back into individual cells.
+
+    Scans the `range_address` on the `sheet_name` and unmerges any merged cells
+    that fall entirely or partially within that range.
 
     Args:
         ctx: Agent context (injected automatically).
-        sheet_name: Name of the sheet.
-        range_address: Range potentially containing merged cells (e.g., 'A1:B2').
+        sheet_name: The name of the target worksheet.
+        range_address: The range (e.g., 'A1:C5') within which to unmerge cells.
 
     Returns:
-        ToolResult: {'success': True} if successful, or {'success': False, 'error': str} on failure.
+        ToolResult: {'success': True} if the operation completed successfully (even if no cells were unmerged).
+                    {'success': False, 'error': str} on failure (e.g., sheet not found, invalid range, connection error).
     """
     print(f"[TOOL] unmerge_cells_range_tool: {sheet_name}!{range_address}")
     # --- Input Validation ---
@@ -217,17 +265,22 @@ def unmerge_cells_range_tool(ctx: RunContextWrapper[AppContext], sheet_name: str
 
 @function_tool
 def set_row_height_tool(ctx: RunContextWrapper[AppContext], sheet_name: str, row_number: int, height: Optional[float]) -> ToolResult:
-    """
-    Sets the height of a specific row in the specified sheet. Set height to None to autofit.
+    """Sets the height for a specific row on a worksheet.
+
+    Adjusts the height of the row specified by `row_number` (1-based index) on
+    the `sheet_name`.
 
     Args:
         ctx: Agent context (injected automatically).
-        sheet_name: Name of the sheet.
-        row_number: Row number (1-based).
-        height: Height in points, or None to autofit. Negative/zero height hides the row.
+        sheet_name: The name of the target worksheet.
+        row_number: The 1-based index of the row whose height needs adjustment.
+        height: The desired height in points (a positive number). Provide `None`
+                to enable autofitting the row height based on content. Providing
+                0 or a negative value typically hides the row.
 
     Returns:
-        ToolResult: {'success': True} if successful, or {'success': False, 'error': str} on failure.
+        ToolResult: {'success': True} if the row height was set successfully.
+                    {'success': False, 'error': str} on failure (e.g., sheet not found, invalid row number, connection error).
     """
     print(f"[TOOL] set_row_height_tool: {sheet_name} row {row_number} height={height}")
     # --- Input Validation ---
@@ -253,17 +306,22 @@ def set_row_height_tool(ctx: RunContextWrapper[AppContext], sheet_name: str, row
 
 @function_tool
 def set_column_width_tool(ctx: RunContextWrapper[AppContext], sheet_name: str, column_letter: str, width: Optional[float]) -> ToolResult:
-    """
-    Sets the width of a specific column in the specified sheet. Set width to None to autofit.
+    """Sets the width for a specific column on a worksheet.
+
+    Adjusts the width of the column specified by `column_letter` (e.g., 'A', 'AB')
+    on the `sheet_name`.
 
     Args:
         ctx: Agent context (injected automatically).
-        sheet_name: Name of the sheet.
-        column_letter: Column letter (e.g., 'A', 'AB').
-        width: Width in characters, or None to autofit. Negative/zero width might hide column (implementation dependent).
+        sheet_name: The name of the target worksheet.
+        column_letter: The letter(s) identifying the column (e.g., 'A', 'AB'). Case-insensitive.
+        width: The desired width in character units (a positive number). Provide
+               `None` to enable autofitting the column width based on content.
+               Providing 0 or a negative value typically hides the column.
 
     Returns:
-        ToolResult: {'success': True} if successful, or {'success': False, 'error': str} on failure.
+        ToolResult: {'success': True} if the column width was set successfully.
+                    {'success': False, 'error': str} on failure (e.g., sheet not found, invalid column letter, connection error).
     """
     print(f"[TOOL] set_column_width_tool: {sheet_name} column {column_letter} width={width}")
     # --- Input Validation ---
@@ -291,16 +349,25 @@ def set_column_width_tool(ctx: RunContextWrapper[AppContext], sheet_name: str, c
 def set_columns_widths_tool(ctx: RunContextWrapper[AppContext],
                              sheet_name: str,
                              widths: Dict[str, Optional[float]]) -> ToolResult:
-    """
-    Set multiple column widths in one call. Maps column letters to widths (float) or None (autofit).
+    """Sets the widths for multiple columns simultaneously using a dictionary mapping.
+
+    Applies column widths based on the provided `widths` dictionary, where keys are
+    column letters (e.g., 'A', 'BC') and values are the desired widths (float for
+    specific width, None for autofit). This is more efficient than calling
+    `set_column_width_tool` repeatedly.
 
     Args:
-        sheet_name: The name of the sheet.
-        widths: A dictionary mapping column letters (e.g., "A", "BC") to desired widths or None for autofit.
+        ctx: Agent context (injected automatically).
+        sheet_name: The name of the target worksheet.
+        widths: A dictionary mapping column letters (str, case-insensitive) to their
+                desired widths (float) or `None` for autofit. Example:
+                `{'A': 15.5, 'B': None, 'D': 20}`
 
     Returns:
-        ToolResult: {'success': True} if all widths set successfully.
-                    {'success': False, 'error': str} if any width setting failed.
+        ToolResult: {'success': True} if all specified column widths were set successfully.
+                    {'success': False, 'error': str} if any error occurred during application
+                    (e.g., sheet not found, invalid column/width, connection error). If some
+                    columns succeed and others fail, an error summarizing the failures is returned.
     """
     # --- Input Validation ---
     if not sheet_name:

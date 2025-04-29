@@ -14,18 +14,30 @@ def copy_paste_range_tool(
     dst_anchor: str, # Top-left cell of the destination paste area
     paste_opts: str, # 'values', 'formulas', 'formats', 'all', 'column_widths', etc.
 ) -> ToolResult:
-    """
-    Copies a source range and paste-special into a destination sheet starting at an anchor cell.
+    """Copies a specified range and performs a paste-special operation to a destination.
+
+    Copies the content and/or formatting from the `src_range` on the `src_sheet`
+    and pastes it to the `dst_sheet`, starting at the `dst_anchor` cell. The type
+    of paste operation (e.g., values only, formats only, formulas) is controlled
+    by the `paste_opts` argument.
 
     Args:
-        src_sheet (str): Source worksheet name.
-        src_range (str): Source range (A1 style, e.g., 'A1:B10').
-        dst_sheet (str): Destination worksheet name.
-        dst_anchor (str): Top-left destination cell (A1 style, e.g., 'D1').
-        paste_opts (str): Paste type ('values', 'formulas', 'formats', 'all', 'column_widths', 'values_number_formats').
+        ctx: Agent context (injected automatically).
+        src_sheet: The name of the worksheet containing the source range.
+        src_range: The range to copy (e.g., 'A1:B10') in A1 notation.
+        dst_sheet: The name of the worksheet where the data will be pasted.
+        dst_anchor: The top-left cell address (e.g., 'D1') of the paste destination area.
+        paste_opts: A string specifying the paste type. Valid options include:
+                    'values': Pastes only the cell values.
+                    'formulas': Pastes formulas.
+                    'formats': Pastes cell formatting.
+                    'all': Pastes everything (values, formulas, formats).
+                    'column_widths': Attempts to paste source column widths (may require separate range).
+                    'values_number_formats': Pastes values and number formats.
 
     Returns:
-        ToolResult: {'success': True} on success or {'success': False, 'error': str}.
+        ToolResult: {'success': True} if the copy-paste operation was successful.
+                    {'success': False, 'error': str} on failure (e.g., sheet/range not found, invalid paste option, connection error).
     """
     # --- Input Validation ---
     valid_paste_opts = {"values", "formulas", "formats", "all", "column_widths", "values_number_formats"}
@@ -56,20 +68,27 @@ def copy_paste_range_tool(
 @function_tool(strict_mode=False) # Allow flexible dict structure for 'mapping'
 def set_named_ranges_tool(ctx: RunContextWrapper[AppContext],
                           # sheet_name: str, # Sheet name often not strictly needed for workbook-level names
-                          mapping: Dict[str, str]) -> ToolResult:
-    """
-    Creates or updates one or more workbook-level named ranges.
+                                  mapping: Dict[str, str]) -> ToolResult:
+    """Creates or updates one or more workbook-scoped Named Ranges.
+
+    Defines or modifies named ranges accessible throughout the entire workbook.
+    Named ranges provide meaningful aliases for cell ranges or constants.
 
     Args:
-        ctx: Agent context.
-        mapping: Dictionary where keys are the desired names (e.g., "SalesData")
-                 and values are the range references they should point to
-                 (e.g., "Sheet1!A1:B10", "='Constants'!$C$1:$C$5").
-                 The reference string should include the sheet name if it's sheet-specific.
-                 Prefix formulas with '=' (e.g., "=OFFSET(...)").
+        ctx: Agent context (injected automatically).
+        mapping: A dictionary where keys are the desired names for the ranges
+                 (e.g., "SalesData", "TaxRate") and values are the references
+                 they should point to. References must be strings and should
+                 typically include the sheet name for cell ranges (e.g., "Sheet1!A1:B10",
+                 "='Constants'!$C$1"). For constant values, prefix with '='
+                 (e.g., "=0.05"). For formulas, use standard Excel syntax
+                 (e.g., "=OFFSET(Sheet1!A1,0,0,COUNTA(Sheet1!A:A),1)").
 
     Returns:
-        ToolResult: {'success': True} on success or {'success': False, 'error': str} on failure.
+        ToolResult: {'success': True} if all named ranges in the mapping were set successfully.
+                    {'success': False, 'error': str} if any error occurred while setting
+                    a named range (e.g., invalid name/reference syntax, connection error).
+                    If some succeed and others fail, an error summarizing the failures is returned.
     """
     # --- Input Validation ---
     if not mapping or not isinstance(mapping, dict):

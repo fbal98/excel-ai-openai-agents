@@ -8,16 +8,20 @@ from typing import Any
 
 @function_tool
 async def open_workbook_tool(ctx: RunContextWrapper[AppContext], file_path: str) -> ToolResult:
-    """
-    Opens or attaches to an Excel workbook at the given path.
+    """Opens an existing Excel workbook file or attaches to an already open instance.
+
+    Loads the workbook specified by `file_path` into the Excel application managed
+    by the agent. If the underlying `ExcelManager` is configured to attach to
+    existing instances, it might connect to an already open workbook matching
+    the path instead of opening a new one. After opening, it updates the workbook shape context.
 
     Args:
-        ctx (RunContextWrapper[AppContext]): Agent context containing the ExcelManager.
-        file_path (str): Path to the Excel workbook to open or attach.
+        ctx: Agent context (injected automatically).
+        file_path: The full path to the Excel workbook file (.xlsx, .xls, .xlsm, etc.) to open.
 
     Returns:
-        ToolResult: {'success': True} if the workbook was opened successfully,
-                    {'success': False, 'error': str} if an error occurred.
+        ToolResult: {'success': True, 'data': str} A message indicating success and if shape was updated.
+                    {'success': False, 'error': str} on failure (e.g., file not found, password protected, connection error).
     """
     try:
         # Delegate to ExcelManager (synchronous)
@@ -41,15 +45,20 @@ async def open_workbook_tool(ctx: RunContextWrapper[AppContext], file_path: str)
 
 @function_tool
 def snapshot_tool(ctx: RunContextWrapper[AppContext]) -> ToolResult:
-    """
-    Saves a temporary snapshot of the current workbook state.
+    """Saves the current state of the workbook to a temporary file for potential restoration.
+
+    Creates a temporary copy of the entire workbook in its current state. This allows
+    the agent to revert back to this state later using `revert_snapshot_tool` if
+    subsequent operations need to be undone. Only one snapshot is stored at a time;
+    calling this again overwrites the previous snapshot.
 
     Args:
-        ctx (RunContextWrapper[AppContext]): Agent context containing the ExcelManager.
+        ctx: Agent context (injected automatically).
 
     Returns:
-        ToolResult: {'success': True, 'data': {'snapshot_path': str}} path to the saved snapshot file.
-                    {'success': False, 'error': str} if an error occurred.
+        ToolResult: {'success': True, 'data': {'snapshot_path': str}} where 'data'
+                    contains the file path of the saved temporary snapshot.
+                    {'success': False, 'error': str} if snapshot creation failed (e.g., connection error, disk space issue).
     """
     try:
         path = ctx.context.excel_manager.snapshot()
@@ -63,8 +72,19 @@ def snapshot_tool(ctx: RunContextWrapper[AppContext]) -> ToolResult:
 
 @function_tool
 def revert_snapshot_tool(ctx: RunContextWrapper[AppContext]) -> ToolResult:
-    """
-    Reverts the workbook to the last snapshot taken. Fails if no snapshot exists.
+    """Restores the workbook to the state saved by the last call to `snapshot_tool`.
+
+    Closes the current workbook without saving changes made since the last snapshot
+    and re-opens the temporary snapshot file created by the `snapshot_tool`. If no
+    snapshot has been taken previously in the session, this tool will fail. After
+    reverting, it updates the workbook shape context.
+
+    Args:
+        ctx: Agent context (injected automatically).
+
+    Returns:
+        ToolResult: {'success': True, 'data': str} A message indicating successful revert and shape refresh.
+                    {'success': False, 'error': str} if reverting failed (e.g., no snapshot exists, file error, connection error).
     """
     try:
         # Propagate manager return value (None on success).
@@ -84,16 +104,21 @@ def revert_snapshot_tool(ctx: RunContextWrapper[AppContext]) -> ToolResult:
 
 @function_tool
 def save_workbook_tool(ctx: RunContextWrapper[AppContext], file_path: str) -> ToolResult:
-    """
-    Saves the current workbook to the given file path.
+    """Saves the currently active workbook to a specified file path.
+
+    Writes the current state of the workbook (all sheets, data, formatting, etc.)
+    to the location specified by `file_path`. If the file already exists, it will
+    be overwritten without warning.
 
     Args:
-        ctx (RunContextWrapper[AppContext]): Agent context containing the ExcelManager.
-        file_path (str): Destination file path where the workbook should be saved.
+        ctx: Agent context (injected automatically).
+        file_path: The full destination path (including filename and extension,
+                   e.g., '/Users/me/Documents/report.xlsx') where the workbook should be saved.
 
     Returns:
-        ToolResult: {'success': True, 'data': str} saved path on success.
-                    {'success': False, 'error': str} if an error occurred.
+        ToolResult: {'success': True, 'data': str} where 'data' is the absolute path
+                    to which the workbook was successfully saved.
+                    {'success': False, 'error': str} on failure (e.g., invalid path, permissions error, connection error).
     """
     print(f"[TOOL] save_workbook_tool: path={file_path}")
     # --- Input Validation ---
