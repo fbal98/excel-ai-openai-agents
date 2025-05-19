@@ -167,9 +167,3 @@ class AppContext:
         except Exception as exc:
             logger.warning("Failed to dump state to %s: %s", file_path, exc)
 
-
-# ---------------------------------------------------------------------------
-#  Legacy stub kept for backward‑compat (rarely used, but imported elsewhere)
-# ---------------------------------------------------------------------------
-class context:  # noqa: N801 – legacy camelCase name
-    logger = logger
