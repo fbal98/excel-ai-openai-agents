@@ -7,6 +7,10 @@ import os
 # Explicitly force to True for now to debug cost calculation issues
 SHOW_COST = True
 
+# Limits for worksheet information included in prompts
+MAX_SHEETS_IN_PROMPT = 30
+MAX_HEADERS_PER_SHEET = 50
+
 WRITE_TOOLS = {
     "open_workbook_tool",
     "set_cell_value_tool",

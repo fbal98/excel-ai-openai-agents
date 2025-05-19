@@ -247,6 +247,15 @@ async def _spinner(prefix="⌛ Thinking", interval=0.2):
         else:
             print()
 
+def _refresh_shape(ctx: AppContext, *, tool_name: str = "pre_turn_refresh") -> None:
+    """Update workbook shape and reset debounce counters if changed."""
+    try:
+        if ctx.update_shape(tool_name=tool_name):
+            ctx.pending_write_count = 0
+            logger.debug("Pre-turn shape refresh OK (v%s)", ctx.shape.version)
+    except Exception as exc:
+        logger.warning("Pre-turn shape refresh failed: %s", exc)
+
 async def _run_agent_with_retry(agent: Agent, input_data: list, ctx: AppContext,
                                 thinking_task=None, is_retry=False) -> Optional[RunResultStreaming]:
     """
@@ -256,13 +265,7 @@ async def _run_agent_with_retry(agent: Agent, input_data: list, ctx: AppContext,
     retry_suffix = " (retry)" if is_retry else ""
 
     # ── Lightweight shape refresh for retries as well ────────────────────
-    try:
-        if ctx.update_shape(tool_name="pre_turn_refresh"):
-            ctx.pending_write_count = 0
-            logger.debug("Pre-turn shape refresh OK (v%s)", ctx.shape.version)
-    except Exception as e:
-        logger.warning("Pre-turn shape refresh failed: %s", e)
-    # --------------------------------------------------------------------
+    _refresh_shape(ctx)
 
     result_stream = None
     first_event_received = False
@@ -453,13 +456,7 @@ async def run_agent_streamed(agent: Agent, user_input: str, ctx: AppContext) -> 
     spinner_prefix = f"🤖 {get_active_provider().capitalize()} Thinking"
 
     # ── Lightweight shape refresh before every turn ──────────────────────
-    try:
-        if ctx.update_shape(tool_name="pre_turn_refresh"):
-            ctx.pending_write_count = 0  # keep debounce logic in sync
-            logger.debug("Pre-turn shape refresh OK (v%s)", ctx.shape.version)
-    except Exception as e:
-        logger.warning("Pre-turn shape refresh failed: %s", e)
-    # --------------------------------------------------------------------
+    _refresh_shape(ctx)
 
     result_stream: Optional[RunResultStreaming] = None
 

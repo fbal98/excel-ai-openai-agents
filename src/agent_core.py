@@ -1,26 +1,28 @@
 import logging
-from typing import Optional, Tuple, Any # Added Tuple, Any
+from typing import Any, Optional, Tuple
 
-from agents import Agent, function_tool, FunctionTool, RunContextWrapper, Runner, Usage, RunResult # Added Runner, Usage, RunResult
+from agents import (
+    Agent,
+    FunctionTool,
+    RunContextWrapper,
+    Runner,
+    Usage,
+    RunResult,
+    function_tool,
+)
 # Import all tools from the new tools package via its __init__.py
 # This imports all functions/classes listed in src.tools.__all__
 from . import tools as excel_tools
+from .constants import MAX_HEADERS_PER_SHEET, MAX_SHEETS_IN_PROMPT
+from .context import AppContext, WorkbookShape
+from .conversation_context import ConversationContext
+from .costs import dollars_for_usage
+from .hooks import SummaryHooks
+from .tools.core_defs import CellStyle, CellValueMap
 
-# Import specific types needed directly if not re-exported or for clarity
-from .tools.core_defs import CellValueMap, CellStyle
-
-# Import other necessary components
-from .context import AppContext, WorkbookShape # Ensure WorkbookShape is imported if used directly
-from .hooks import SummaryHooks # Changed ActionLoggingHooks to SummaryHooks
-from .costs import dollars_for_usage # Added import
-from .conversation_context import ConversationContext # Added import
-# tool_wrapper logic is handled implicitly by the FunctionTool decorator or manual application in tools/__init__.py
-
-logger = logging.getLogger(__name__) # Added logger
+logger = logging.getLogger(__name__)
 
 # --- Configuration ---
-MAX_SHEETS_IN_PROMPT = 30
-MAX_HEADERS_PER_SHEET = 50  # Limit number of headers per sheet in the prompt
 
 def _compact_headers(headers):
     """
@@ -115,7 +117,12 @@ def _format_workbook_shape(shape: Optional[WorkbookShape]) -> str: # Use Workboo
         reduction_percent = 0
         if total_original_headers > 0: # Avoid division by zero
              reduction_percent = ((total_original_headers - total_compacted_headers) / total_original_headers) * 100
-        logger.info(f"Workbook shape optimization: Reduced headers from {total_original_headers} to {total_compacted_headers} items ({reduction_percent:.1f}% reduction)")
+        logger.debug(
+            "Workbook shape optimization: Reduced headers from %s to %s items (%.1f%% reduction)",
+            total_original_headers,
+            total_compacted_headers,
+            reduction_percent,
+        )
 
     headers_str = '; '.join(f'{s}:{",".join(map(str,h))}' for s, h in processed_headers.items() if h) if processed_headers else ""
 
@@ -285,11 +292,11 @@ _validated_agent_tools: list[FunctionTool] = [
 
 # --- Updated run_and_cost ---
 from .costs import dollars_for_usage
-from agents import Runner, Agent, Usage
-from typing import Tuple, Any
-import logging # Added for logging
+from agents import Agent, Runner, Usage
+from typing import Any, Tuple
+import logging
 
-logger = logging.getLogger(__name__) # Added logger
+logger = logging.getLogger(__name__)
 
 async def run_and_cost(
     agent: Agent[AppContext], # The agent instance created by create_excel_assistant_agent
