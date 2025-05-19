@@ -1,7 +1,6 @@
 # src/tools/formula_ops.py
 from agents import RunContextWrapper, function_tool
 from ..context import AppContext
-from ..context import AppContext
 from ..excel_ops import ExcelConnectionError
 from .core_defs import ToolResult
 from openpyxl.utils.cell import coordinate_from_string # Import from correct submodule

@@ -4,6 +4,7 @@ import copy
 import difflib, json, logging, tiktoken
 from typing import Any, Dict, List, Literal, Optional, TYPE_CHECKING
 from agents import RunResult # Changed to RunResult as per the error message
+from agents.results import RunResultBase
 
 if TYPE_CHECKING:
     from .context import AppContext, WorkbookShape # Avoid circular import

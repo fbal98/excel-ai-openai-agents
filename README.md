@@ -1,39 +1,44 @@
 # Autonomous Excel Assistant
 
-A command-line tool that uses an AI agent to perform spreadsheet operations on Excel workbooks autonomously.
+Autonomous Excel Assistant leverages the OpenAI Agents SDK to modify Excel spreadsheets from natural-language instructions. It can run against a saved workbook in batch mode or connect to a live Excel session for real-time changes.
+
+## Quick Start
+1. **Install dependencies**
+   ```bash
+   pip install -r requirements.txt
+   ```
+2. **Set your API key**
+   ```bash
+   export OPENAI_API_KEY=your-key
+   ```
+3. **Run an instruction**
+   ```bash
+   python -m src.cli --instruction "Add totals for each column" --input-file data.xlsx --output-file out.xlsx
+   ```
+
+The agent will open the workbook, apply your instruction, and save the result. Use `--live` to connect directly to Excel for instant updates.
 
 ## Features
-- Natural-language instructions to manipulate spreadsheets via the OpenAI API.
-- Supports batch mode (via `openpyxl`) and live mode (via `xlwings`).
-- Streaming mode to see agent progress in real-time.
-- Verbose mode for debug logging and full result inspection.
-- Emoji-enhanced, structured logging for clear status updates.
-- Bulk operations for tables, formulas, and cell styling.
-- **Dynamic Context**: Workbook structure (`<workbook_shape>`) and progress updates (`<progress_summary>`) are injected directly into the conversation history as assistant messages, keeping the LLM informed without cluttering the main system prompt.
-
-## Requirements
-- Python 3.9 or higher
-- An OpenAI API key set in the environment (`OPENAI_API_KEY`) or in a `.env` file
-- Dependencies (see `requirements.txt`):
-  - `openai-agents`, `python-dotenv`, `openpyxl`, `xlwings`
-
-## Installation
-```bash
-pip install -r requirements.txt
-```
+- Natural-language commands executed via the OpenAI API
+- Batch mode using `openpyxl` and live mode using `xlwings`
+- Streaming output to watch agent progress
+- Verbose logging for debugging
+- Emoji-enhanced status messages
+- Bulk tools for tables, formulas and cell styling
+- **Dynamic Context**: workbook shape and progress summaries automatically shared with the LLM
 
 ## Usage
-```bash
+```
 python -m src.cli --instruction "<your instruction>" [options]
 ```
 
 ### Options
-- `--instruction` (required): Natural-language command for the AI agent.
-- `--input-file` (optional): Path to an existing Excel workbook. If omitted, a new workbook is created.
-- `--output-file` (required in batch mode): Path to save the modified workbook (ignored in live mode).
-- `--live`: Enable live editing in Excel via `xlwings`. Changes appear in real time.
-- `--stream`: Enable streaming to see the agent's progress as it works.
-- `-v`, `--verbose`: Enable verbose logging (debug-level messages and full result dump).
+- `--instruction` (required): Command for the AI agent
+- `--input-file`: Existing workbook path (a new one is created if omitted)
+- `--output-file`: Destination workbook in batch mode
+- `--live`: Apply changes in real time using Excel
+- `--stream`: Show the agent's progress live
+- `-v`, `--verbose`: Print detailed logs
 
 ### Examples
 **Batch mode**
@@ -73,7 +78,7 @@ python -m src.cli -v \
 ```
 
 ## Logging
-Uses Python's `logging` module with emoji prefixes:
+Status messages use emoji to make progress clear:
 - 📂 Loaded or 🆕 Created workbook
 - 📊 Live mode enabled
 - 🔄 Streaming mode enabled
@@ -88,12 +93,19 @@ Uses Python's `logging` module with emoji prefixes:
 ## Operation Examples
 - Create sheets, tables, and data structures
 - Format cells with colors, fonts, borders
-- Merge/unmerge cells and adjust row heights and column widths
+- Merge or unmerge cells and adjust row heights and column widths
 - Add formulas and calculations
 - Find, filter, and process data
 - Verify operations for accuracy
 
 ## Limitations
-- Live mode requires `xlwings` and a running Excel instance.
-- Some style and inspection operations may not be supported in live mode.
-- Maximum 25 agent turns per instruction for complexity control.
+- Live mode requires `xlwings` and a running Excel instance
+- Some style and inspection operations may not work in live mode
+- Maximum 25 agent turns per instruction keep complexity manageable
+
+## Learn More
+See the documentation in `agents-sdk-docs/` for advanced usage, tool development, and design details.
+
+## Contributing
+Issues and pull requests are welcome! If you encounter a problem or have an improvement in mind, open an issue to discuss it. New tools, bug fixes, and documentation updates all help the community.
+

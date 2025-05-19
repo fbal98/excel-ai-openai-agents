@@ -54,7 +54,6 @@ def with_retry(max_retries: int = 1):
                     attempts += 1
 
             _wrapper.__signature__ = inspect.signature(fn)
-            _wrapper.__signature__ = inspect.signature(fn)
             return _wrapper
 
         else:
